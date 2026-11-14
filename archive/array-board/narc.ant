@@ -1,0 +1,185 @@
+# NARC Genesys 5.1, written in Antares: the UCI front end (uci.cpp).
+#
+# Run it interpreted:  antares src/narc.ant
+# Or use a binary from builds/ (made by `python build.py`).
+#
+# Commands: uci, isready, ucinewgame, position, go, stop, setoption, quit,
+# and the extras d (show board), eval, perft <depth>.
+
+use "search"
+use "config"
+
+ENGINE_NAME = "NARC Genesys 5.1 (Antares)"
+move_overhead = 80
+net_file = NETWORK_FILE
+net_ready = no
+
+to ensure_network() {
+    when not net_ready {
+        load_network(net_file)
+        change net_ready = yes
+    }
+}
+
+# position [startpos | fen <fen>] [moves <m1> <m2> ...]
+to set_position(words) {
+    n = len(words)
+    i = 1
+    when n > 1 and words[1] == "fen" {
+        fen = ""
+        i = 2
+        while i < n and words[i] != "moves" {
+            fen = fen + words[i] + " "
+            i = i + 1
+        }
+        set_fen(trim(fen))
+    } else {
+        set_fen(START_FEN)
+        i = 2
+    }
+    when i < n and words[i] == "moves" {
+        i = i + 1
+        while i < n {
+            when not play_text_move(words[i]) {
+                show "info string illegal move {words[i]}"
+                stop
+            }
+            i = i + 1
+        }
+    }
+}
+
+# The number after `name` in a go command, or `fallback`.
+to go_value(words, name, fallback) {
+    i = 1
+    while i < len(words) - 1 {
+        when words[i] == name { give number(words[i + 1]) }
+        i = i + 1
+    }
+    fallback
+}
+
+# go ...: sets the limits (TimeManager::init) and searches.
+to go(words) {
+    ensure_network()
+    change start_time = clock()
+    change depth_limit = go_value(words, "depth", 0)
+    change node_limit = go_value(words, "nodes", 0)
+    movetime = go_value(words, "movetime", 0)
+    infinite = has(words, "infinite")
+    when side == 0 {
+        clock_ms = go_value(words, "wtime", -1)
+        inc = go_value(words, "winc", 0)
+    } else {
+        clock_ms = go_value(words, "btime", -1)
+        inc = go_value(words, "binc", 0)
+    }
+    movestogo = go_value(words, "movestogo", 0)
+    change timed = no
+    when movetime > 0 {
+        change timed = yes
+        change soft_ms = max(1, movetime - move_overhead)
+        change hard_ms = soft_ms
+    } else when clock_ms >= 0 and not infinite {
+        change timed = yes
+        left = max(1, clock_ms - move_overhead)
+        when movestogo > 0 { mtg = min(movestogo, 40) } else { mtg = 30 }
+        # Spend the increment only in proportion to the reserve
+        inc_share = 0
+        when inc > 0 { inc_share = max(min(left / (20 * inc), 0.75), 0) }
+        change hard_ms = max(1, min(trunc(left * 2 / 5), (trunc(left / mtg) + inc) * 4))
+        change soft_ms = max(min(trunc(left / mtg) + trunc(inc * inc_share), hard_ms), 1)
+    }
+    best = think()
+    # In infinite mode the GUI expects bestmove only after "stop".
+    while infinite and not stop_flag {
+        line = input()
+        when line == nothing or line == "quit" {
+            change quit_flag = yes
+            change stop_flag = yes
+        } else when line == "stop" {
+            change stop_flag = yes
+        }
+    }
+    when best == 0 { show "bestmove 0000" } else { show "bestmove {move_text(best)}" }
+}
+
+to set_option(words) {
+    # setoption name <Name> value <Value>
+    name = ""
+    value = ""
+    target = "none"
+    each w in words {
+        when w == "name" {
+            target = "name"
+        } else when w == "value" {
+            target = "value"
+        } else when target == "name" {
+            name = trim(name + " " + w)
+        } else when target == "value" {
+            value = trim(value + " " + w)
+        }
+    }
+    name = lower(name)
+    when name == "evalfile" {
+        change net_file = value
+        change net_ready = no
+    } else when name == "move overhead" {
+        change move_overhead = number(value)
+    }
+}
+
+to handle(line) {
+    words = split(line)
+    when len(words) == 0 { give nothing }
+    cmd = words[0]
+    when cmd == "uci" {
+        show "id name {ENGINE_NAME}"
+        show "id author Madushan Dissanayake (Sri Lanka)"
+        show "option name Move Overhead type spin default 80 min 0 max 5000"
+        show "option name EvalFile type string default {NETWORK_FILE}"
+        show "uciok"
+    } else when cmd == "isready" {
+        ensure_network()
+        show "readyok"
+    } else when cmd == "ucinewgame" {
+        clear_tables()
+    } else when cmd == "position" {
+        set_position(words)
+    } else when cmd == "go" {
+        go(words)
+    } else when cmd == "setoption" {
+        set_option(words)
+    } else when cmd == "quit" {
+        change quit_flag = yes
+    } else when cmd == "d" {
+        show board_text()
+    } else when cmd == "eval" {
+        ensure_network()
+        show "eval {evaluate()} cp, network units {network_units()} (side to move)"
+    } else when cmd == "perft" {
+        depth = 1
+        when len(words) > 1 { depth = number(words[1]) }
+        started = clock()
+        count = perft(depth, 0)
+        show "perft {depth}: {count} positions in {round((clock() - started) * 1000)} ms"
+    }
+}
+
+show "{ENGINE_NAME} by Madushan Dissanayake (Sri Lanka)"
+set_fen(START_FEN)
+while not quit_flag {
+    # a command that arrived while the engine was thinking is handled first
+    when pending_line != nothing {
+        line = pending_line
+        change pending_line = nothing
+    } else {
+        line = input()
+    }
+    when line == nothing { stop }
+    try {
+        handle(line)
+    } else problem {
+        show "info string error: {problem}"
+    }
+}

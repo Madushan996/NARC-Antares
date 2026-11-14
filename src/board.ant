@@ -1,0 +1,793 @@
+# NARC Genesys in Antares: the board, making moves, and move generation.
+#
+# Like the C++ engine, the position is kept in bitboards: 64-bit integers with
+# one bit per square (a1 = bit 0, h1 = bit 7, a8 = bit 56, h8 = bit 63).
+# Pieces are numbered as in the C++ engine: colour * 8 + type.
+# Moves use the same flags and the same 16-bit code as types.h.
+
+PAWN = 0x0
+KNIGHT = 0x1
+BISHOP = 0x2
+ROOK = 0x3
+QUEEN = 0x4
+KING = 0x5
+EMPTY = 0xF                  # no piece on a square
+NO_SQ = 0x40                # no en-passant square
+
+# move flags
+QUIET = 0x0
+DOUBLE_PUSH = 0x1
+CASTLE_KING = 0x2
+CASTLE_QUEEN = 0x3
+CAPTURE = 0x4
+EN_PASSANT = 0x5
+PROMO_N = 0x8
+PROMO_B = 0x9
+PROMO_R = 0xA
+PROMO_Q = 0xB
+PROMO_CAP_N = 0xC
+PROMO_CAP_B = 0xD
+PROMO_CAP_R = 0xE
+PROMO_CAP_Q = 0xF
+
+RANK_2 = 0x000000000000FF00
+RANK_7 = 0x00FF000000000000
+FILE_A = 0x0101010101010101
+FILE_H = 0x8080808080808080
+UP = int(8)
+DOWN = int(-8)
+
+MAX_PLY = 120
+MOVES_PER_PLY = 256
+
+# ----- attack tables -----
+# ray[direction * 64 + square]: the squares in that direction up to the edge.
+# Directions: 0 north, 1 north-east, 2 east, 3 south-east, 4 south,
+# 5 south-west, 6 west, 7 north-west. 0, 1, 2 and 7 run towards higher squares.
+knight_att = ints(64)
+king_att = ints(64)
+pawn_att = ints(128)        # pawn_att[colour * 64 + square]: squares that pawn attacks
+ray = ints(512)
+
+dir_df = [0, 1, 1, 1, 0, -1, -1, -1]
+dir_dr = [1, 1, 0, -1, -1, -1, 0, 1]
+jump_df = [1, 2, 2, 1, -1, -2, -2, -1]
+jump_dr = [2, 1, -1, -2, -2, -1, 1, 2]
+
+to on_board(f, r) = f >= 0 and f < 8 and r >= 0 and r < 8
+
+repeat 64 as n {
+    sq = n - 1
+    f = sq % 8
+    r = floor(sq / 8)
+    knights = int(0)
+    kings = int(0)
+    repeat 8 as k {
+        when on_board(f + jump_df[k - 1], r + jump_dr[k - 1]) {
+            knights = knights | (1 << ((r + jump_dr[k - 1]) * 8 + f + jump_df[k - 1]))
+        }
+        when on_board(f + dir_df[k - 1], r + dir_dr[k - 1]) {
+            kings = kings | (1 << ((r + dir_dr[k - 1]) * 8 + f + dir_df[k - 1]))
+        }
+        beam = int(0)
+        f2 = f + dir_df[k - 1]
+        r2 = r + dir_dr[k - 1]
+        while on_board(f2, r2) {
+            beam = beam | (1 << (r2 * 8 + f2))
+            f2 = f2 + dir_df[k - 1]
+            r2 = r2 + dir_dr[k - 1]
+        }
+        ray[(k - 1) * 64 + sq] = beam
+    }
+    knight_att[sq] = knights
+    king_att[sq] = kings
+    white = int(0)
+    black = int(0)
+    each df in [-1, 1] {
+        when on_board(f + df, r + 1) { white = white | (1 << ((r + 1) * 8 + f + df)) }
+        when on_board(f + df, r - 1) { black = black | (1 << ((r - 1) * 8 + f + df)) }
+    }
+    pawn_att[sq] = white
+    pawn_att[64 + sq] = black
+}
+
+# Squares a bishop on `sq` attacks when `occ` are the occupied squares. Each
+# ray is cut at the first occupied square, found with one bit scan.
+to bishop_att(sq, occ) {
+    a = ray[64 + sq]
+    b = a & occ
+    when b != 0 { a = a xor ray[64 + lowest_bit(b)] }
+    c = ray[448 + sq]
+    b = c & occ
+    when b != 0 { c = c xor ray[448 + lowest_bit(b)] }
+    d = ray[192 + sq]
+    b = d & occ
+    when b != 0 { d = d xor ray[192 + highest_bit(b)] }
+    e = ray[320 + sq]
+    b = e & occ
+    when b != 0 { e = e xor ray[320 + highest_bit(b)] }
+    a | c | d | e
+}
+
+to rook_att(sq, occ) {
+    a = ray[sq]
+    b = a & occ
+    when b != 0 { a = a xor ray[lowest_bit(b)] }
+    c = ray[128 + sq]
+    b = c & occ
+    when b != 0 { c = c xor ray[128 + lowest_bit(b)] }
+    d = ray[256 + sq]
+    b = d & occ
+    when b != 0 { d = d xor ray[256 + highest_bit(b)] }
+    e = ray[384 + sq]
+    b = e & occ
+    when b != 0 { e = e xor ray[384 + highest_bit(b)] }
+    a | c | d | e
+}
+
+# ----- the position -----
+
+board = ints(64)            # the piece on each square, EMPTY if empty
+by_type = ints(6)           # one bitboard per piece type
+by_color = ints(2)          # one bitboard per colour
+king_sq = ints(2)
+side = int(0)
+ep = int(64)                # en-passant target square, NO_SQ if none
+castle = int(0)             # 1 white short, 2 white long, 4 black short, 8 black long
+halfmove = int(0)
+since_null = int(0)
+gply = int(0)               # plies played, counting the game and the search
+
+# Position keys: random 64-bit numbers combined with xor, as in the C++ engine.
+hash = int(0)
+pawn_key = int(0)
+minor_key = int(0)
+np_key = ints(2)
+
+seed(5120)
+z_piece = ints(1024)
+z_ep = ints(65)
+z_castle = ints(16)
+repeat 1024 as i { z_piece[i - 1] = rand_bits() }
+repeat 64 as i { z_ep[i - 1] = rand_bits() }
+repeat 16 as i { z_castle[i - 1] = rand_bits() }
+z_side = rand_bits()
+
+# Castling rights that survive a move from or to each square.
+spoil = ints(64)
+repeat 64 as i { spoil[i - 1] = 15 }
+spoil[4] = 12
+spoil[7] = 14
+spoil[0] = 13
+spoil[60] = 3
+spoil[63] = 11
+spoil[56] = 7
+
+# What is needed to take a move back, one entry per ply.
+HIST = 2400
+h_hash = ints(HIST)
+h_pawn = ints(HIST)
+h_minor = ints(HIST)
+h_npw = ints(HIST)
+h_npb = ints(HIST)
+h_castle = ints(HIST)
+h_ep = ints(HIST)
+h_half = ints(HIST)
+h_null = ints(HIST)
+h_cap = ints(HIST)
+h_src = ints(HIST)              # the move played at each ply: from, to, flag (-1 = null move)
+h_dst = ints(HIST)
+h_flag = ints(HIST)
+h_piece = ints(HIST)            # the piece that moved
+
+# fresh[perspective * AH + ply] = 1 when the network accumulator saved for that
+# ply is up to date (see nnue.ant). Playing a move marks the next ply stale.
+AH = HIST + 1
+fresh = zeros(2 * AH)
+
+# Generated moves, MOVES_PER_PLY slots for each search ply.
+MV_TOTAL = (2 * MAX_PLY + 12) * MOVES_PER_PLY
+mv_from = ints(MV_TOTAL)
+mv_to = ints(MV_TOTAL)
+mv_flag = ints(MV_TOTAL)
+mv_code = ints(MV_TOTAL)
+mv_score = zeros(MV_TOTAL)
+mv_n = int(0)
+
+to put_piece(p, sq) {
+    board[sq] = p
+    b = 1 << sq
+    kind_of = p & 7
+    c = p >> 3
+    by_type[kind_of] = by_type[kind_of] | b
+    by_color[c] = by_color[c] | b
+    z = z_piece[p * 64 + sq]
+    change hash = hash xor z
+    when kind_of == 0 {
+        change pawn_key = pawn_key xor z
+    } else {
+        np_key[c] = np_key[c] xor z
+        when kind_of == 5 { king_sq[c] = sq }
+        when kind_of == 1 or kind_of == 2 or kind_of == 5 { change minor_key = minor_key xor z }
+    }
+}
+
+to take_piece(sq) {
+    p = board[sq]
+    board[sq] = EMPTY
+    b = 1 << sq
+    kind_of = p & 7
+    c = p >> 3
+    by_type[kind_of] = by_type[kind_of] xor b
+    by_color[c] = by_color[c] xor b
+    z = z_piece[p * 64 + sq]
+    change hash = hash xor z
+    when kind_of == 0 {
+        change pawn_key = pawn_key xor z
+    } else {
+        np_key[c] = np_key[c] xor z
+        when kind_of == 1 or kind_of == 2 or kind_of == 5 { change minor_key = minor_key xor z }
+    }
+}
+
+# Is `sq` attacked by a piece of colour `attacker`?
+to attacked(sq, attacker) {
+    theirs = by_color[attacker]
+    when pawn_att[(1 - attacker) * 64 + sq] & by_type[0] & theirs != 0 { give yes }
+    when knight_att[sq] & by_type[1] & theirs != 0 { give yes }
+    when king_att[sq] & by_type[5] & theirs != 0 { give yes }
+    occ = by_color[0] | by_color[1]
+    when bishop_att(sq, occ) & (by_type[2] | by_type[4]) & theirs != 0 { give yes }
+    rook_att(sq, occ) & (by_type[3] | by_type[4]) & theirs != 0
+}
+
+to in_check() = attacked(king_sq[side], 1 - side)
+
+# Every piece of either colour that attacks `sq`, given the occupied squares.
+to attackers_to(sq, occ) {
+    (pawn_att[sq] & by_type[0] & by_color[1]) | (pawn_att[64 + sq] & by_type[0] & by_color[0]) | (knight_att[sq] & by_type[1]) | (king_att[sq] & by_type[5]) | (bishop_att(sq, occ) & (by_type[2] | by_type[4])) | (rook_att(sq, occ) & (by_type[3] | by_type[4]))
+}
+
+to has_non_pawn(c) = by_color[c] & ~(by_type[0] | by_type[5]) != 0
+
+# ----- making and taking back moves -----
+
+to save_state() {
+    h_hash[gply] = hash
+    h_pawn[gply] = pawn_key
+    h_minor[gply] = minor_key
+    h_npw[gply] = np_key[0]
+    h_npb[gply] = np_key[1]
+    h_castle[gply] = castle
+    h_ep[gply] = ep
+    h_half[gply] = halfmove
+    h_null[gply] = since_null
+}
+
+to restore_state() {
+    change hash = h_hash[gply]
+    change pawn_key = h_pawn[gply]
+    change minor_key = h_minor[gply]
+    np_key[0] = h_npw[gply]
+    np_key[1] = h_npb[gply]
+    change castle = h_castle[gply]
+    change ep = h_ep[gply]
+    change halfmove = h_half[gply]
+    change since_null = h_null[gply]
+}
+
+# Plays a move. The caller checks afterwards that the mover's king is safe.
+to make(src, dst, flag) {
+    us = side
+    p = board[src]
+    cap = EMPTY
+    save_state()
+    change hash = hash xor z_castle[castle]
+    when ep != NO_SQ { change hash = hash xor z_ep[ep] }
+    change ep = NO_SQ
+    change halfmove = halfmove + 1
+    change since_null = since_null + 1
+    when us == 0 { fwd = UP } else { fwd = DOWN }
+
+    when flag == EN_PASSANT {
+        cap = board[dst - fwd]
+        take_piece(dst - fwd)
+    } else when flag == CAPTURE or flag >= PROMO_CAP_N {
+        cap = board[dst]
+        take_piece(dst)
+    }
+    take_piece(src)
+    when flag >= PROMO_N {
+        put_piece(us * 8 + 1 + (flag & 3), dst)
+    } else {
+        put_piece(p, dst)
+    }
+    when flag == CASTLE_KING {
+        rook = board[dst + 1]
+        take_piece(dst + 1)
+        put_piece(rook, dst - 1)
+    } else when flag == CASTLE_QUEEN {
+        rook = board[dst - 2]
+        take_piece(dst - 2)
+        put_piece(rook, dst + 1)
+    } else when flag == DOUBLE_PUSH {
+        change ep = src + fwd
+        change hash = hash xor z_ep[ep]
+    }
+    when cap != EMPTY or p & 7 == 0 { change halfmove = 0 }
+
+    change castle = castle & spoil[src] & spoil[dst]
+    change hash = hash xor z_castle[castle] xor z_side
+    h_cap[gply] = cap
+    h_src[gply] = src
+    h_dst[gply] = dst
+    h_flag[gply] = flag
+    h_piece[gply] = p
+    change side = 1 - us
+    change gply = gply + 1
+    fresh[gply] = 0
+    fresh[AH + gply] = 0
+}
+
+to unmake(src, dst, flag) {
+    change gply = gply - 1
+    us = 1 - side
+    change side = us
+    cap = h_cap[gply]
+    when us == 0 { fwd = UP } else { fwd = DOWN }
+
+    when flag == CASTLE_KING {
+        rook = board[dst - 1]
+        take_piece(dst - 1)
+        put_piece(rook, dst + 1)
+    } else when flag == CASTLE_QUEEN {
+        rook = board[dst + 1]
+        take_piece(dst + 1)
+        put_piece(rook, dst - 2)
+    }
+    p = board[dst]
+    take_piece(dst)
+    when flag >= PROMO_N { put_piece(us * 8, src) } else { put_piece(p, src) }
+    when flag == EN_PASSANT {
+        put_piece(cap, dst - fwd)
+    } else when cap != EMPTY {
+        put_piece(cap, dst)
+    }
+    restore_state()
+}
+
+to make_null() {
+    save_state()
+    when ep != NO_SQ { change hash = hash xor z_ep[ep] }
+    change ep = NO_SQ
+    change halfmove = halfmove + 1
+    change since_null = 0
+    change hash = hash xor z_side
+    h_flag[gply] = -1
+    change side = 1 - side
+    change gply = gply + 1
+    fresh[gply] = 0
+    fresh[AH + gply] = 0
+}
+
+to unmake_null() {
+    change gply = gply - 1
+    change side = 1 - side
+    restore_state()
+}
+
+# ----- draws -----
+
+# As in Genesys 5.1: one earlier occurrence since the last capture, pawn move
+# or null move counts as a repetition.
+to is_repetition() {
+    limit = halfmove
+    when since_null < limit { limit = since_null }
+    when gply < limit { limit = gply }
+    back = int(4)
+    while back <= limit {
+        when h_hash[gply - back] == hash { give yes }
+        back = back + 2
+    }
+    no
+}
+
+to insufficient_material() {
+    when by_type[0] | by_type[3] | by_type[4] != 0 { give no }
+    popcount(by_type[1] | by_type[2]) <= 1
+}
+
+# ----- move generation -----
+
+to push_move(src, dst, flag) {
+    mv_from[mv_n] = src
+    mv_to[mv_n] = dst
+    mv_flag[mv_n] = flag
+    mv_code[mv_n] = src | (dst << 6) | (flag << 12)
+    change mv_n = mv_n + 1
+}
+
+# One move from `src` to each square in the bitboard `targets`.
+to push_targets(src, targets) {
+    rest = targets
+    while rest != 0 {
+        dst = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        when board[dst] == EMPTY { push_move(src, dst, QUIET) } else { push_move(src, dst, CAPTURE) }
+    }
+}
+
+to gen_pawns(us, enemy, mode) {
+    when us == 0 {
+        fwd = UP
+        last_rank = RANK_7
+        home = RANK_2
+    } else {
+        fwd = DOWN
+        last_rank = RANK_2
+        home = RANK_7
+    }
+    rest = by_type[0] & by_color[us]
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        here = 1 << sq
+        promo = here & last_rank != 0
+        dst = sq + fwd
+        when board[dst] == EMPTY {
+            when promo {
+                when mode != 2 { push_move(sq, dst, PROMO_Q) }
+                when mode != 1 {
+                    push_move(sq, dst, PROMO_N)
+                    push_move(sq, dst, PROMO_R)
+                    push_move(sq, dst, PROMO_B)
+                }
+            } else when mode != 1 {
+                push_move(sq, dst, QUIET)
+                when here & home != 0 and board[dst + fwd] == EMPTY { push_move(sq, dst + fwd, DOUBLE_PUSH) }
+            }
+        }
+        when mode == 2 { skip }
+        hits = pawn_att[us * 64 + sq]
+        caps = hits & enemy
+        while caps != 0 {
+            dst = lowest_bit(caps)
+            caps = caps & (caps - 1)
+            when promo {
+                push_move(sq, dst, PROMO_CAP_Q)
+                push_move(sq, dst, PROMO_CAP_N)
+                push_move(sq, dst, PROMO_CAP_R)
+                push_move(sq, dst, PROMO_CAP_B)
+            } else {
+                push_move(sq, dst, CAPTURE)
+            }
+        }
+        when ep != NO_SQ and hits & (1 << ep) != 0 { push_move(sq, ep, EN_PASSANT) }
+    }
+}
+
+to gen_castles(us) {
+    k = us * 56 + 4
+    short = 1 << (us * 2)
+    long = 2 << (us * 2)
+    them = 1 - us
+    can_short = castle & short != 0 and board[k + 1] == EMPTY and board[k + 2] == EMPTY
+    can_long = castle & long != 0 and board[k - 1] == EMPTY and board[k - 2] == EMPTY and board[k - 3] == EMPTY
+    when not can_short and not can_long { give nothing }
+    when attacked(k, them) { give nothing }
+    when can_short and not attacked(k + 1, them) { push_move(k, k + 2, CASTLE_KING) }
+    when can_long and not attacked(k - 1, them) { push_move(k, k - 2, CASTLE_QUEEN) }
+}
+
+# Writes moves for the side to move into the move arrays starting at slot
+# `start`, and gives back the slot after the last one.
+# mode 0: every move; 1: captures and queen promotions; 2: all the other moves.
+# The moves may leave the king in check; make() them and test to find out.
+to gen_moves(start, mode) {
+    change mv_n = start
+    us = side
+    own = by_color[us]
+    enemy = by_color[1 - us]
+    occ = own | enemy
+    when mode == 1 {
+        targets = enemy
+    } else when mode == 2 {
+        targets = ~occ
+    } else {
+        targets = ~own
+    }
+
+    gen_pawns(us, enemy, mode)
+    rest = by_type[1] & own
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        push_targets(sq, knight_att[sq] & targets)
+    }
+    rest = (by_type[2] | by_type[4]) & own
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        push_targets(sq, bishop_att(sq, occ) & targets)
+    }
+    rest = (by_type[3] | by_type[4]) & own
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        push_targets(sq, rook_att(sq, occ) & targets)
+    }
+    sq = king_sq[us]
+    push_targets(sq, king_att[sq] & targets)
+    when mode != 1 { gen_castles(us) }
+    mv_n
+}
+
+# The moves for search ply `ply`; gives back how many. With noisy = yes: only
+# captures and queen promotions.
+to generate(ply, noisy) {
+    start = int(ply * MOVES_PER_PLY)
+    when noisy { give gen_moves(start, int(1)) - start }
+    gen_moves(start, int(0)) - start
+}
+
+# Could this quiet move (a move code from the hash table or a killer) be played
+# here, leaving king safety aside? Lets the search try it before generating moves.
+to quiet_is_playable(code) {
+    src = code & 63
+    dst = (code >> 6) & 63
+    flag = code >> 12
+    us = side
+    p = board[src]
+    when p == EMPTY { give no }
+    when p >> 3 != us { give no }
+    kind_of = p & 7
+    when flag == CASTLE_KING or flag == CASTLE_QUEEN {
+        k = us * 56 + 4
+        when kind_of != 5 or src != k { give no }
+        them = 1 - us
+        when flag == CASTLE_KING {
+            when dst != k + 2 or castle & (1 << (us * 2)) == 0 { give no }
+            when board[k + 1] != EMPTY or board[k + 2] != EMPTY { give no }
+            give not attacked(k, them) and not attacked(k + 1, them)
+        }
+        when dst != k - 2 or castle & (2 << (us * 2)) == 0 { give no }
+        when board[k - 1] != EMPTY or board[k - 2] != EMPTY or board[k - 3] != EMPTY { give no }
+        give not attacked(k, them) and not attacked(k - 1, them)
+    }
+    when board[dst] != EMPTY { give no }
+    when kind_of == 0 {
+        here = 1 << src
+        when us == 0 {
+            fwd = UP
+            last_rank = RANK_7
+            home = RANK_2
+        } else {
+            fwd = DOWN
+            last_rank = RANK_2
+            home = RANK_7
+        }
+        when flag == DOUBLE_PUSH {
+            give here & home != 0 and dst == src + fwd + fwd and board[src + fwd] == EMPTY
+        }
+        when dst != src + fwd { give no }
+        when flag == QUIET { give here & last_rank == 0 }
+        give here & last_rank != 0 and (flag == PROMO_N or flag == PROMO_B or flag == PROMO_R)
+    }
+    when flag != QUIET { give no }
+    occ = by_color[0] | by_color[1]
+    when kind_of == 1 {
+        reach = knight_att[src]
+    } else when kind_of == 5 {
+        reach = king_att[src]
+    } else when kind_of == 2 {
+        reach = bishop_att(src, occ)
+    } else when kind_of == 3 {
+        reach = rook_att(src, occ)
+    } else {
+        reach = bishop_att(src, occ) | rook_att(src, occ)
+    }
+    reach & (1 << dst) != 0
+}
+
+# Is there any legal move? (Used to tell mate and stalemate apart.)
+to has_legal_move(ply) {
+    n = generate(ply, no)
+    us = side
+    i = int(ply * MOVES_PER_PLY)
+    last = i + n
+    while i < last {
+        make(mv_from[i], mv_to[i], mv_flag[i])
+        safe = not attacked(king_sq[us], 1 - us)
+        unmake(mv_from[i], mv_to[i], mv_flag[i])
+        when safe { give yes }
+        i = i + 1
+    }
+    no
+}
+
+# ----- static exchange evaluation -----
+
+see_type = [100, 300, 300, 500, 900, 20000, 0]
+
+# Does the exchange started by this move win at least `threshold`?
+# A direct port of Position::see_ge.
+to see_ge(src, dst, flag, threshold) {
+    when flag == CASTLE_KING or flag == CASTLE_QUEEN { give 0 >= threshold }
+    when flag == EN_PASSANT {
+        swap = see_type[0]
+    } else when board[dst] == EMPTY {
+        swap = see_type[6]
+    } else {
+        swap = see_type[board[dst] & 7]
+    }
+    swap = swap - threshold
+    when flag >= PROMO_N {
+        on_square = see_type[1 + (flag & 3)]
+        swap = swap + on_square - 100
+    } else {
+        on_square = see_type[board[src] & 7]
+    }
+    when swap < 0 { give no }
+    swap = on_square - swap
+    when swap <= 0 { give yes }       # even losing the moved piece keeps us at or above the threshold
+
+    occ = (by_color[0] | by_color[1]) xor (1 << src) xor (1 << dst)
+    when flag == EN_PASSANT {
+        when side == 0 { occ = occ xor (1 << (dst - 8)) } else { occ = occ xor (1 << (dst + 8)) }
+    }
+    attackers = attackers_to(dst, occ) & occ
+    diag = by_type[2] | by_type[4]
+    straight = by_type[3] | by_type[4]
+    c = side
+    result = yes        # yes: the side that made the last capture is winning the exchange so far
+    while yes {
+        c = 1 - c
+        mine = attackers & by_color[c]
+        when mine == 0 { stop }
+        result = not result
+        pt = int(0)
+        while pt < 5 and mine & by_type[pt] == 0 { pt = pt + 1 }
+        when pt == 5 {
+            # the king may capture only if the opponent has no attackers left
+            when attackers & by_color[1 - c] & occ != 0 { result = not result }
+            stop
+        }
+        swap = see_type[pt] - swap
+        when result { floor_value = 1 } else { floor_value = 0 }
+        when swap < floor_value { stop }
+        occ = occ xor (1 << lowest_bit(mine & by_type[pt]))
+        when pt == 0 or pt == 2 or pt == 4 { attackers = attackers | (bishop_att(dst, occ) & diag) }
+        when pt == 3 or pt == 4 { attackers = attackers | (rook_att(dst, occ) & straight) }
+        attackers = attackers & occ
+    }
+    result
+}
+
+# ----- text: positions and moves -----
+
+fen_piece = {P: 0, N: 1, B: 2, R: 3, Q: 4, K: 5, p: 8, n: 9, b: 10, r: 11, q: 12, k: 13}
+file_letter = {a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6, h: 7}
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+to square_name(sq) = "abcdefgh"[sq & 7] + text((sq >> 3) + 1)
+
+to move_text(code) {
+    flag = code >> 12
+    name = square_name(code & 63) + square_name((code >> 6) & 63)
+    when flag >= 8 { name = name + "nbrq"[flag & 3] }
+    name
+}
+
+to set_fen(fen) {
+    fields = split(fen)
+    repeat 64 as i { board[i - 1] = EMPTY }
+    repeat 6 as i { by_type[i - 1] = 0 }
+    by_color[0] = 0
+    by_color[1] = 0
+    np_key[0] = 0
+    np_key[1] = 0
+    change hash = int(0)
+    change pawn_key = int(0)
+    change minor_key = int(0)
+    change gply = int(0)
+    fresh[0] = 0
+    fresh[AH] = 0
+
+    r = 7
+    f = 0
+    each ch in fields[0] {
+        when ch == "/" {
+            r = r - 1
+            f = 0
+        } else when has(fen_piece, ch) {
+            put_piece(int(fen_piece[ch]), int(r * 8 + f))
+            f = f + 1
+        } else {
+            f = f + number(ch)
+        }
+    }
+    when fields[1] == "b" {
+        change side = int(1)
+        change hash = hash xor z_side
+    } else {
+        change side = int(0)
+    }
+    rights = 0
+    when len(fields) > 2 {
+        when has(fields[2], "K") { rights = rights + 1 }
+        when has(fields[2], "Q") { rights = rights + 2 }
+        when has(fields[2], "k") { rights = rights + 4 }
+        when has(fields[2], "q") { rights = rights + 8 }
+    }
+    change castle = int(rights)
+    change hash = hash xor z_castle[castle]
+    change ep = NO_SQ
+    when len(fields) > 3 and fields[3] != "-" {
+        change ep = int(number(file_letter[fields[3][0]]) + (number(fields[3][1]) - 1) * 8)
+        change hash = hash xor z_ep[ep]
+    }
+    change halfmove = int(0)
+    when len(fields) > 4 { change halfmove = int(number(fields[4])) }
+    change since_null = halfmove
+}
+
+# The legal move written as `name` (like "e2e4" or "e7e8q"): its slot, or -1.
+to find_move(name, ply) {
+    n = generate(ply, no)
+    us = side
+    i = int(ply * MOVES_PER_PLY)
+    last = i + n
+    while i < last {
+        when move_text(mv_code[i]) == name {
+            make(mv_from[i], mv_to[i], mv_flag[i])
+            safe = not attacked(king_sq[us], 1 - us)
+            unmake(mv_from[i], mv_to[i], mv_flag[i])
+            when safe { give i }
+        }
+        i = i + 1
+    }
+    int(-1)
+}
+
+to play_text_move(name) {
+    i = find_move(name, MAX_PLY + 2)
+    when i < 0 { give no }
+    make(mv_from[i], mv_to[i], mv_flag[i])
+    yes
+}
+
+to board_text() {
+    letters = "PNBRQK..pnbrqk.."
+    out = ""
+    r = 7
+    while r >= 0 {
+        row = text(r + 1) + "  "
+        repeat 8 as f { row = row + letters[board[r * 8 + f - 1]] + " " }
+        out = out + row + "\n"
+        r = r - 1
+    }
+    out + "\n   a b c d e f g h"
+}
+
+# ----- perft: counts the positions reachable in `depth` moves -----
+
+to perft(depth, ply) {
+    n = generate(ply, no)
+    us = side
+    them = 1 - us
+    nodes = 0
+    i = int(ply * MOVES_PER_PLY)
+    last = i + n
+    while i < last {
+        src = mv_from[i]
+        dst = mv_to[i]
+        flag = mv_flag[i]
+        make(src, dst, flag)
+        when not attacked(king_sq[us], them) {
+            when depth == 1 { nodes = nodes + 1 } else { nodes = nodes + perft(depth - 1, ply + 1) }
+        }
+        unmake(src, dst, flag)
+        i = i + 1
+    }
+    nodes
+}

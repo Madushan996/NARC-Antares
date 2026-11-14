@@ -1,0 +1,849 @@
+# NARC Genesys in Antares: the search.
+#
+# A port of search.cpp, movepick.cpp, tt.cpp and history.h with the features
+# that are switched on by default in Genesys 5.1:
+#   iterative deepening with aspiration windows, principal variation search,
+#   quiescence search, transposition table, mate-distance pruning,
+#   reverse futility pruning, razoring, null-move pruning, internal iterative
+#   reduction, late-move / futility / history / SEE pruning, late-move
+#   reductions, check and singular extensions (with multi-cut),
+#   killers, counter moves, threat-split quiet history, continuation history
+#   (1 and 2 plies back), capture history, and the four correction histories.
+# The tuned constants are the 5.1 values from search.h.
+#
+# Differences from the C++ engine are listed in narc/README.md.
+
+use "board"
+use "nnue"
+
+INF = 32001
+MATE = 32000
+MATE_IN_MAX = 31872
+NONE = 32002
+USED = -1000000000000000
+TT_SIZE = 262144
+SING_SLOT = MAX_PLY + 4        # move slots used by singular (excluded-move) searches
+
+# ----- transposition table (one entry per slot) -----
+# bound: 0 empty, 1 upper, 2 lower, 3 exact
+tt_hash = zeros(TT_SIZE)
+tt_mv = zeros(TT_SIZE)
+tt_sc = zeros(TT_SIZE)
+tt_ev = zeros(TT_SIZE)
+tt_dp = zeros(TT_SIZE)
+tt_bnd = zeros(TT_SIZE)
+
+# ----- move ordering tables (history.h) -----
+quiet_hist = zeros(32768)          # [side][from attacked][to attacked][from][to]
+cap_hist = zeros(4608)             # [piece][to][captured type]
+cont_hist = zeros(589824)          # [previous piece][previous to][piece][to]
+counter_mv = zeros(768)            # [previous piece][previous to]
+pawn_corr = zeros(32768)           # [side][pawn key]
+np_corr = zeros(65536)             # [side][piece colour][non-pawn key]
+minor_corr = zeros(32768)          # [side][minor key]
+cont_corr = zeros(589824)          # [piece][to] two plies back -> [piece][to] one ply back
+
+pidx = [0, 0, 1, 2, 3, 4, 5, 0, 0, 6, 7, 8, 9, 10, 11, 0, 0]
+order_type = [0, 100, 320, 330, 500, 950, 0]
+order_promo = [320, 330, 500, 950]
+
+# Extra facts about each generated move, alongside mv_from / mv_to / ...
+MV_TOTAL = (2 * MAX_PLY + 12) * MOVES_PER_PLY
+mv_hist = zeros(MV_TOTAL)          # quiet history score
+mv_qidx = zeros(MV_TOTAL)          # index into quiet_hist
+mv_pt = zeros(MV_TOTAL)            # piece index * 64 + to
+mv_cidx = zeros(MV_TOTAL)          # index into cap_hist, -1 if not a capture
+
+# ----- per-ply search stack; entry ply + 4 belongs to `ply` (as in the C++) -----
+STACK = MAX_PLY + 12
+ss_eval = zeros(STACK)
+ss_move = zeros(STACK)
+ss_pt = zeros(STACK)               # piece index * 64 + to of the move played, -1 if none
+ss_excluded = zeros(STACK)
+ss_dext = zeros(STACK)
+killer1 = zeros(STACK)
+killer2 = zeros(STACK)
+pv_len = zeros(STACK)
+pv_tab = zeros(STACK * STACK)
+tried_q = zeros(STACK * 64)        # quiets tried at this ply: quiet_hist index
+tried_qpt = zeros(STACK * 64)      # ... and piece * 64 + to
+tried_c = zeros(STACK * 32)        # captures tried: cap_hist index
+
+# Squares the side not to move attacks, per ply. A square is attacked when its
+# mark equals the ply's current id.
+thr_mark = zeros(STACK * 120)
+thr_cur = zeros(STACK)
+thr_seq = 0
+
+# Late-move reduction table: 0.76 + ln(depth) * ln(moves) / 2.18
+lmr = zeros(4096)
+repeat 63 as d {
+    repeat 63 as m {
+        lmr[d * 64 + m] = trunc(0.76 + log(d) * log(m) / 2.18)
+    }
+}
+
+# ----- search state -----
+nodes = 0
+seldepth = 0
+root_depth = 0
+best_move = 0
+best_score = 0
+stop_flag = no
+quit_flag = no
+pending_line = nothing
+root_nodes = zeros(4096)
+
+# limits
+timed = no
+soft_ms = 0
+hard_ms = 0
+node_limit = 0
+depth_limit = 0
+start_time = 0
+quiet_mode = no
+
+to elapsed_ms() = (clock() - start_time) * 1000
+
+to clear_tables() {
+    change tt_hash = zeros(TT_SIZE)
+    change tt_mv = zeros(TT_SIZE)
+    change tt_sc = zeros(TT_SIZE)
+    change tt_ev = zeros(TT_SIZE)
+    change tt_dp = zeros(TT_SIZE)
+    change tt_bnd = zeros(TT_SIZE)
+    change quiet_hist = zeros(32768)
+    change cap_hist = zeros(4608)
+    change cont_hist = zeros(589824)
+    change counter_mv = zeros(768)
+    change pawn_corr = zeros(32768)
+    change np_corr = zeros(65536)
+    change minor_corr = zeros(32768)
+    change cont_corr = zeros(589824)
+}
+
+# The clock, the node limit and the GUI are checked every 128 positions.
+to should_stop() {
+    when stop_flag { give yes }
+    when nodes % 128 == 0 {
+        when node_limit > 0 and nodes >= node_limit { change stop_flag = yes }
+        when timed and elapsed_ms() >= hard_ms { change stop_flag = yes }
+        when input_waiting() {
+            line = input()
+            when line == nothing or line == "quit" {
+                change stop_flag = yes
+                change quit_flag = yes
+            } else when line == "stop" {
+                change stop_flag = yes
+            } else when line == "isready" {
+                show "readyok"
+            } else {
+                change pending_line = line
+            }
+        }
+    }
+    stop_flag
+}
+
+# history_update from history.h: the new value of an entry after a bonus.
+to hist_new(entry, bonus) {
+    b = max(min(bonus, 16384), -16384)
+    entry + b - trunc(entry * abs(b) / 16384)
+}
+
+to tt_store(key, ply, move, score, ev, depth, bound, pv_bonus) {
+    slot = key % TT_SIZE
+    same = tt_hash[slot] == key and tt_bnd[slot] != 0
+    when move != 0 or not same { tt_mv[slot] = move }
+    when same and bound != 3 and depth + 3 + 2 * pv_bonus < tt_dp[slot] { give nothing }
+    when score >= MATE_IN_MAX { score = score + ply } else when score <= -MATE_IN_MAX { score = score - ply }
+    tt_hash[slot] = key
+    tt_sc[slot] = score
+    tt_ev[slot] = ev
+    tt_dp[slot] = depth
+    tt_bnd[slot] = bound
+}
+
+# A stored score, with mate distances counted from this ply again.
+to score_from_tt(score, ply) {
+    when score >= MATE_IN_MAX { give score - ply }
+    when score <= -MATE_IN_MAX { give score + ply }
+    score
+}
+
+to mark_threats(ply) {
+    change thr_seq = thr_seq + 1
+    id = thr_seq
+    thr_cur[ply] = id
+    base = ply * 120
+    them = 1 - side
+    each sq in squares {
+        p = board[sq]
+        when p == EMPTY { skip }
+        when piece_color[p] != them { skip }
+        pt = piece_type[p]
+        when pt == 1 {
+            when them == 0 {
+                thr_mark[base + sq + 9] = id
+                thr_mark[base + sq + 11] = id
+            } else {
+                thr_mark[base + sq - 9] = id
+                thr_mark[base + sq - 11] = id
+            }
+        } else when pt == 2 {
+            each d in knight_steps { thr_mark[base + sq + d] = id }
+        } else when pt == 6 {
+            each d in king_steps { thr_mark[base + sq + d] = id }
+        } else {
+            when pt != 4 {
+                each d in bishop_dirs {
+                    s = sq + d
+                    while board[s] == EMPTY {
+                        thr_mark[base + s] = id
+                        s = s + d
+                    }
+                    thr_mark[base + s] = id
+                }
+            }
+            when pt != 3 {
+                each d in rook_dirs {
+                    s = sq + d
+                    while board[s] == EMPTY {
+                        thr_mark[base + s] = id
+                        s = s + d
+                    }
+                    thr_mark[base + s] = id
+                }
+            }
+        }
+    }
+}
+
+# Gives every move in slots first..last an ordering score (movepick.cpp):
+# hash move, then captures by victim and capture history, killers, the
+# counter move, then quiets by history. `plain` = quiescence ordering.
+to score_moves(ply, first, last, hash_move, k1, k2, counter, cont1, cont2, plain) {
+    tbase = ply * 120
+    tid = thr_cur[ply]
+    hbase = side * 16384
+    i = first
+    while i < last {
+        code = mv_code[i]
+        flag = mv_flag[i]
+        src = mv_from[i]
+        dst = mv_to[i]
+        pt = pidx[board[src]] * 64 + sq64_of[dst]
+        mv_pt[i] = pt
+        when flag == 4 or flag == 5 or flag >= 11 {
+            s = 0
+            mv_cidx[i] = -1
+            when flag != 11 {
+                when flag == 5 { victim = 1 } else { victim = piece_type[board[dst]] }
+                mv_cidx[i] = pt * 6 + victim - 1
+                s = order_type[victim] * 10 + trunc(cap_hist[pt * 6 + victim - 1] / 32)
+            }
+            when flag >= 8 { s = s + order_promo[flag % 4] * 10 }
+            mv_hist[i] = 0
+            mv_score[i] = 100000000 + s
+        } else when plain {
+            mv_hist[i] = 0
+            mv_score[i] = 0
+        } else {
+            q = hbase + sq64_of[src] * 64 + sq64_of[dst]
+            when thr_mark[tbase + src] == tid { q = q + 8192 }
+            when thr_mark[tbase + dst] == tid { q = q + 4096 }
+            h = quiet_hist[q]
+            when cont1 >= 0 { h = h + cont_hist[cont1 + pt] }
+            when cont2 >= 0 { h = h + cont_hist[cont2 + pt] }
+            mv_hist[i] = h
+            mv_qidx[i] = q
+            when code == k1 {
+                mv_score[i] = 90000000
+            } else when code == k2 {
+                mv_score[i] = 89000000
+            } else when code == counter {
+                mv_score[i] = 88000000
+            } else {
+                mv_score[i] = h
+            }
+        }
+        when code == hash_move { mv_score[i] = 1073741824 }
+        i = i + 1
+    }
+}
+
+# The best-scored move not yet used, or -1.
+to pick(first, last) {
+    best_i = -1
+    best_s = -900000000000000
+    i = first
+    while i < last {
+        when mv_score[i] > best_s {
+            best_s = mv_score[i]
+            best_i = i
+        }
+        i = i + 1
+    }
+    best_i
+}
+
+# The network's eval adjusted by what the search has learned about its errors
+# in similar positions (Searcher::correct_eval, with corr_plus).
+to corrected(raw, ci_pawn, ci_npw, ci_npb, ci_minor, ci_cont) {
+    total = 48 * pawn_corr[ci_pawn] + 32 * np_corr[ci_npw] + 32 * np_corr[ci_npb] + 24 * minor_corr[ci_minor]
+    when ci_cont >= 0 { total = total + 24 * cont_corr[ci_cont] }
+    max(min(raw + trunc(total / 2048), MATE_IN_MAX - 1), 1 - MATE_IN_MAX)
+}
+
+to corr_new(entry, goal, weight) = max(min(trunc((entry * (512 - weight) + goal * weight) / 512), 6400), -6400)
+
+to update_correction(raw, best, depth, ci_pawn, ci_npw, ci_npb, ci_minor, ci_cont) {
+    goal = max(min((best - raw) * 16, 6400), -6400)
+    weight = min(depth * depth + 2 * depth + 1, 128)
+    pawn_corr[ci_pawn] = corr_new(pawn_corr[ci_pawn], goal, weight)
+    np_corr[ci_npw] = corr_new(np_corr[ci_npw], goal, weight)
+    np_corr[ci_npb] = corr_new(np_corr[ci_npb], goal, weight)
+    minor_corr[ci_minor] = corr_new(minor_corr[ci_minor], goal, weight)
+    when ci_cont >= 0 { cont_corr[ci_cont] = corr_new(cont_corr[ci_cont], goal, weight) }
+}
+
+# Rewards the quiet move that caused a cutoff and penalises the quiets tried
+# before it (Searcher::update_quiet_stats).
+to quiet_bonus(sp, q, pt, bonus) {
+    quiet_hist[q] = hist_new(quiet_hist[q], bonus)
+    c1 = ss_pt[sp - 1]
+    when c1 >= 0 { cont_hist[c1 * 768 + pt] = hist_new(cont_hist[c1 * 768 + pt], bonus) }
+    c2 = ss_pt[sp - 2]
+    when c2 >= 0 { cont_hist[c2 * 768 + pt] = hist_new(cont_hist[c2 * 768 + pt], bonus) }
+}
+
+to update_quiet_stats(ply, best, best_q, best_pt, bonus, n_tried) {
+    sp = ply + 4
+    when killer1[sp] != best {
+        killer2[sp] = killer1[sp]
+        killer1[sp] = best
+    }
+    when ss_move[sp - 1] != 0 and ss_pt[sp - 1] >= 0 { counter_mv[ss_pt[sp - 1]] = best }
+    quiet_bonus(sp, best_q, best_pt, bonus)
+    i = 0
+    while i < n_tried {
+        quiet_bonus(sp, tried_q[ply * 64 + i], tried_qpt[ply * 64 + i], -bonus)
+        i = i + 1
+    }
+}
+
+to update_capture_stats(ply, best_c, bonus, n_tried) {
+    when best_c >= 0 { cap_hist[best_c] = hist_new(cap_hist[best_c], bonus) }
+    i = 0
+    while i < n_tried {
+        c = tried_c[ply * 32 + i]
+        when c >= 0 { cap_hist[c] = hist_new(cap_hist[c], -bonus) }
+        i = i + 1
+    }
+}
+
+to copy_pv(ply, code) {
+    pv_tab[ply * STACK] = code
+    n = pv_len[ply + 1]
+    i = 0
+    while i < n {
+        pv_tab[ply * STACK + i + 1] = pv_tab[(ply + 1) * STACK + i]
+        i = i + 1
+    }
+    pv_len[ply] = n + 1
+}
+
+# ----- quiescence search (Searcher::qsearch) -----
+
+to qsearch(alpha, beta, ply) {
+    pv = beta - alpha > 1
+    change nodes = nodes + 1
+    pv_len[ply] = 0
+    when ply > seldepth { change seldepth = ply }
+    when should_stop() { give 0 }
+    when halfmove >= 100 or insufficient_material() { give 0 }
+    checked = in_check()
+    when ply >= MAX_PLY - 1 {
+        when checked { give 0 }
+        give evaluate()
+    }
+    sp = ply + 4
+    key = hash
+    slot = key % TT_SIZE
+    tt_hit = tt_hash[slot] == key and tt_bnd[slot] != 0
+    tt_move = 0
+    tt_score = NONE
+    tt_eval = NONE
+    tt_bound = 0
+    when tt_hit {
+        tt_move = tt_mv[slot]
+        tt_score = score_from_tt(tt_sc[slot], ply)
+        tt_eval = tt_ev[slot]
+        tt_bound = tt_bnd[slot]
+        when not pv and (tt_bound == 3 or (tt_bound == 2 and tt_score >= beta) or (tt_bound == 1 and tt_score <= alpha)) {
+            give tt_score
+        }
+    }
+    best = -INF
+    raw_eval = NONE
+    ev = NONE
+    when not checked {
+        when tt_hit and tt_eval != NONE { raw_eval = tt_eval } else { raw_eval = evaluate() }
+        stm = side
+        ci_cont = -1
+        when ss_move[sp - 1] != 0 and ss_pt[sp - 1] >= 0 and ss_move[sp - 2] != 0 and ss_pt[sp - 2] >= 0 {
+            ci_cont = ss_pt[sp - 2] * 768 + ss_pt[sp - 1]
+        }
+        ev = corrected(raw_eval, stm * 16384 + pawn_key % 16384, stm * 32768 + np_key[0] % 16384,
+            stm * 32768 + 16384 + np_key[1] % 16384, stm * 16384 + minor_key % 16384, ci_cont)
+        when tt_hit and (tt_bound == 3 or (tt_bound == 2 and tt_score > ev) or (tt_bound == 1 and tt_score < ev)) {
+            ev = tt_score
+        }
+        best = ev
+        when best >= beta {
+            when not tt_hit { tt_store(key, ply, 0, best, raw_eval, -1, 2, 0) }
+            give best
+        }
+        alpha = max(alpha, best)
+    }
+
+    us = side
+    them = 1 - us
+    first = ply * MOVES_PER_PLY
+    last = first + generate(ply, not checked)
+    score_moves(ply, first, last, tt_move, 0, 0, 0, -1, -1, yes)
+    best_move_here = 0
+    moves_played = 0
+    futility_base = ev + 180
+    while yes {
+        i = pick(first, last)
+        when i < 0 { stop }
+        src = mv_from[i]
+        dst = mv_to[i]
+        flag = mv_flag[i]
+        code = mv_code[i]
+        mv_score[i] = USED
+        when not checked {
+            when not see_ge(src, dst, flag, 0) { skip }
+            when flag < 8 and futility_base <= alpha and not see_ge(src, dst, flag, 1) {
+                best = max(best, futility_base)
+                skip
+            }
+        }
+        make(src, dst, flag)
+        when attacked(king_sq[us], them) {
+            unmake(src, dst, flag)
+            skip
+        }
+        moves_played = moves_played + 1
+        score = -qsearch(-beta, -alpha, ply + 1)
+        unmake(src, dst, flag)
+        when stop_flag { give 0 }
+        when score > best {
+            best = score
+            when score > alpha {
+                best_move_here = code
+                alpha = score
+                when pv { copy_pv(ply, code) }
+                when alpha >= beta { stop }
+            }
+        }
+    }
+    when checked and moves_played == 0 { give ply - MATE }
+    when best >= beta { bound = 2 } else { bound = 1 }
+    tt_store(key, ply, best_move_here, best, raw_eval, 0, bound, 0)
+    best
+}
+
+# ----- the main search (Searcher::search) -----
+
+to search(alpha, beta, depth, ply, cutnode) {
+    when depth <= 0 { give qsearch(alpha, beta, ply) }
+    pv = beta - alpha > 1
+    root = ply == 0
+    change nodes = nodes + 1
+    pv_len[ply] = 0
+    when ply > seldepth { change seldepth = ply }
+    sp = ply + 4
+    excluded = ss_excluded[sp]
+    ss_dext[sp + 1] = ss_dext[sp]
+    when not root {
+        when should_stop() { give 0 }
+        when is_repetition() or halfmove >= 100 or insufficient_material() { give 0 }
+        when ply >= MAX_PLY - 1 {
+            when in_check() { give 0 }
+            give evaluate()
+        }
+        # mate-distance pruning
+        alpha = max(alpha, ply - MATE)
+        beta = min(beta, MATE - ply - 1)
+        when alpha >= beta { give alpha }
+    }
+
+    # Transposition table
+    key = hash
+    tt_hit = no
+    tt_move = 0
+    tt_score = NONE
+    tt_eval = NONE
+    tt_depth = -99
+    tt_bound = 0
+    when excluded == 0 {
+        slot = key % TT_SIZE
+        when tt_hash[slot] == key and tt_bnd[slot] != 0 {
+            tt_hit = yes
+            tt_move = tt_mv[slot]
+            tt_score = score_from_tt(tt_sc[slot], ply)
+            tt_eval = tt_ev[slot]
+            tt_depth = tt_dp[slot]
+            tt_bound = tt_bnd[slot]
+        }
+    }
+    when root and best_move != 0 { tt_move = best_move }
+    when not pv and tt_hit and tt_depth >= depth and (tt_bound == 3 or (tt_bound == 2 and tt_score >= beta) or (tt_bound == 1 and tt_score <= alpha)) {
+        give tt_score
+    }
+
+    # Static evaluation, corrected by the correction histories
+    checked = in_check()
+    us = side
+    them = 1 - us
+    ci_pawn = us * 16384 + pawn_key % 16384
+    ci_npw = us * 32768 + np_key[0] % 16384
+    ci_npb = us * 32768 + 16384 + np_key[1] % 16384
+    ci_minor = us * 16384 + minor_key % 16384
+    ci_cont = -1
+    when ss_move[sp - 1] != 0 and ss_pt[sp - 1] >= 0 and ss_move[sp - 2] != 0 and ss_pt[sp - 2] >= 0 {
+        ci_cont = ss_pt[sp - 2] * 768 + ss_pt[sp - 1]
+    }
+    raw_eval = NONE
+    ev = NONE
+    when not checked {
+        when tt_hit and tt_eval != NONE { raw_eval = tt_eval } else { raw_eval = evaluate() }
+        ev = corrected(raw_eval, ci_pawn, ci_npw, ci_npb, ci_minor, ci_cont)
+        # a bounded search score is a better estimate than the static eval when it points the right way
+        when tt_hit and (tt_bound == 3 or (tt_bound == 2 and tt_score > ev) or (tt_bound == 1 and tt_score < ev)) {
+            ev = tt_score
+        }
+    }
+    ss_eval[sp] = ev
+    when ss_eval[sp - 2] != NONE { past = ss_eval[sp - 2] } else { past = ss_eval[sp - 4] }
+    improving = not checked and past != NONE and ev > past
+    when improving { imp = 1 } else { imp = 0 }
+    killer1[sp + 1] = 0
+    killer2[sp + 1] = 0
+
+    when not pv and not checked and excluded == 0 {
+        # Reverse futility pruning: far above beta with little depth left
+        when depth <= 8 and ev < MATE_IN_MAX and ev - (69 * depth - 63 * imp) >= beta {
+            give trunc((ev + beta) / 2)
+        }
+        # Razoring: hopeless at low depth unless captures change it
+        when depth <= 3 and ev + 220 + 230 * depth < alpha {
+            q = qsearch(alpha - 1, alpha, ply)
+            when q < alpha { give q }
+        }
+        # Null-move pruning
+        when depth >= 3 and ev >= beta and ss_move[sp - 1] != 0 and nonpawn[us] > 0 {
+            r = 3 + floor(depth / 3) + min(trunc((ev - beta) / 200), 3)
+            ss_move[sp] = 0
+            ss_pt[sp] = -1
+            make_null()
+            score = -search(-beta, 1 - beta, depth - r, ply + 1, not cutnode)
+            unmake_null()
+            when stop_flag { give 0 }
+            when score >= beta {
+                when score >= MATE_IN_MAX { give beta }
+                give score
+            }
+        }
+    }
+
+    # Internal iterative reduction: without a hash move this node is probably not worth the full depth
+    when (pv or cutnode) and depth >= 4 and tt_move == 0 { depth = depth - 1 }
+
+    counter = 0
+    when ss_move[sp - 1] != 0 and ss_pt[sp - 1] >= 0 { counter = counter_mv[ss_pt[sp - 1]] }
+    mark_threats(ply)
+    when excluded == 0 { move_slot = ply } else { move_slot = ply + SING_SLOT }
+    first = move_slot * MOVES_PER_PLY
+    last = first + generate(move_slot, no)
+    when ss_pt[sp - 1] >= 0 { cont1 = ss_pt[sp - 1] * 768 } else { cont1 = -1 }
+    when ss_pt[sp - 2] >= 0 { cont2 = ss_pt[sp - 2] * 768 } else { cont2 = -1 }
+    score_moves(ply, first, last, tt_move, killer1[sp], killer2[sp], counter, cont1, cont2, no)
+
+    best = -INF
+    moves_played = 0
+    best_here = 0
+    best_quiet = yes
+    best_q = 0
+    best_pt = 0
+    best_c = -1
+    n_quiets = 0
+    n_caps = 0
+    skip_quiets = no
+    lmp_limit = trunc((3 + depth * depth) / (2 - imp))
+    when root { late_from = 3 } else { late_from = 1 }
+
+    while yes {
+        i = pick(first, last)
+        when i < 0 { stop }
+        src = mv_from[i]
+        dst = mv_to[i]
+        flag = mv_flag[i]
+        code = mv_code[i]
+        quiet = not (flag == 4 or flag == 5 or flag >= 11)
+        # Captures are tried by score first; one that loses material goes to the back of the queue.
+        when not quiet and mv_score[i] >= 100000000 and mv_score[i] < 1000000000 and not see_ge(src, dst, flag, 0) {
+            mv_score[i] = mv_score[i] - 200000000
+            skip
+        }
+        mv_score[i] = USED
+        when code == excluded { skip }
+        when quiet and skip_quiets { skip }
+        hist_score = mv_hist[i]
+        q_idx = mv_qidx[i]
+        pt_idx = mv_pt[i]
+        c_idx = mv_cidx[i]
+
+        # Move-level pruning (never when every line so far is mated)
+        when not root and best > -MATE_IN_MAX and nonpawn[us] > 0 {
+            when quiet {
+                when moves_played >= lmp_limit {
+                    skip_quiets = yes
+                    skip
+                }
+                when not checked and depth <= 8 and ev + 110 + 93 * depth <= alpha {
+                    skip_quiets = yes
+                    skip
+                }
+                when depth <= 4 and hist_score < -2043 * depth { skip }
+                when depth <= 8 and not see_ge(src, dst, flag, -56 * depth) { skip }
+            } else when depth <= 8 and not see_ge(src, dst, flag, -28 * depth * depth) {
+                skip
+            }
+        }
+
+        # Singular extension: if every alternative to the hash move fails well below its score, the hash
+        # move is forced and gets an extra ply; if even the alternatives beat beta, cut here (multi-cut).
+        extension = 0
+        when not root and code == tt_move and depth >= 7 and excluded == 0 and tt_depth >= depth - 3 and tt_bound >= 2 and abs(tt_score) < MATE_IN_MAX and ply < 2 * root_depth {
+            s_beta = tt_score - 2 * depth
+            ss_excluded[sp] = code
+            s = search(s_beta - 1, s_beta, trunc((depth - 1) / 2), ply, cutnode)
+            ss_excluded[sp] = 0
+            when stop_flag { give 0 }
+            when s < s_beta {
+                when not pv and s < s_beta - 24 { extension = 2 } else { extension = 1 }
+            } else when s_beta >= beta {
+                give s_beta
+            } else when tt_score >= beta {
+                extension = -1
+            }
+        }
+
+        ss_move[sp] = code
+        ss_pt[sp] = pt_idx
+        make(src, dst, flag)
+        when attacked(king_sq[us], them) {
+            unmake(src, dst, flag)
+            skip
+        }
+        moves_played = moves_played + 1
+        gives_check = in_check()
+        when extension == 0 and gives_check and ply < 2 * root_depth { extension = 1 }
+        when extension >= 2 { ss_dext[sp + 1] = ss_dext[sp] + 1 } else { ss_dext[sp + 1] = ss_dext[sp] }
+        new_depth = depth - 1 + extension
+        nodes_before = nodes
+
+        when depth >= 3 and moves_played > late_from {
+            r = lmr[min(depth, 63) * 64 + min(moves_played, 63)]
+            when cutnode { r = r + 1 }
+            when pv { r = r - 1 }
+            when improving { r = r - 1 }
+            when gives_check { r = r - 1 }
+            when quiet { r = r - max(min(trunc(hist_score / 6859), 2), -2) } else { r = trunc(r / 2) }
+            reduced = max(min(new_depth - r, new_depth), 1)
+            score = -search(-alpha - 1, -alpha, reduced, ply + 1, yes)
+            when score > alpha and reduced < new_depth {
+                score = -search(-alpha - 1, -alpha, new_depth, ply + 1, not cutnode)
+            }
+        } else when not pv or moves_played > 1 {
+            score = -search(-alpha - 1, -alpha, new_depth, ply + 1, not cutnode)
+        } else {
+            score = alpha + 1       # forces the full-window search below for the first PV move
+        }
+        when pv and (moves_played == 1 or score > alpha) {
+            score = -search(-beta, -alpha, new_depth, ply + 1, no)
+        }
+        unmake(src, dst, flag)
+        when stop_flag { give 0 }
+        when root { root_nodes[code % 4096] = root_nodes[code % 4096] + nodes - nodes_before }
+
+        when score > best {
+            best = score
+            when score > alpha {
+                best_here = code
+                best_quiet = quiet
+                best_q = q_idx
+                best_pt = pt_idx
+                best_c = c_idx
+                alpha = score
+                when pv { copy_pv(ply, code) }
+                when alpha >= beta { stop }
+            }
+        }
+        when code != best_here {
+            when quiet {
+                when n_quiets < 64 {
+                    tried_q[ply * 64 + n_quiets] = q_idx
+                    tried_qpt[ply * 64 + n_quiets] = pt_idx
+                    n_quiets = n_quiets + 1
+                }
+            } else when n_caps < 32 {
+                tried_c[ply * 32 + n_caps] = c_idx
+                n_caps = n_caps + 1
+            }
+        }
+    }
+
+    when moves_played == 0 {
+        when excluded != 0 { give alpha }
+        # with pruning, "no move played" may also mean every move was pruned: only mate/stalemate if none exist
+        when not has_legal_move(move_slot) {
+            when checked { give ply - MATE }
+            give 0
+        }
+        give alpha
+    }
+
+    when best >= beta {
+        bonus = min(170 * depth - 80, 1700)
+        when best_quiet { update_quiet_stats(ply, best_here, best_q, best_pt, bonus, n_quiets) }
+        when best_quiet { best_c = -1 }
+        update_capture_stats(ply, best_c, bonus, n_caps)
+    }
+    when excluded == 0 {
+        when best >= beta {
+            bound = 2
+        } else when pv and best_here != 0 {
+            bound = 3
+        } else {
+            bound = 1
+        }
+        when pv { pv_bonus = 1 } else { pv_bonus = 0 }
+        tt_store(key, ply, best_here, best, raw_eval, depth, bound, pv_bonus)
+        # learn the evaluation's error, only from results that bound it in a meaningful direction
+        when not checked and (best_here == 0 or best_quiet) and not (bound == 2 and best <= ev) and not (bound == 1 and best >= ev) and abs(best) < MATE_IN_MAX {
+            update_correction(raw_eval, best, depth, ci_pawn, ci_npw, ci_npb, ci_minor, ci_cont)
+        }
+    }
+    best
+}
+
+# ----- iterative deepening (Searcher::run) -----
+
+to report(depth, score) {
+    when quiet_mode { give nothing }
+    ms = max(elapsed_ms(), 1)
+    line = "info depth {depth} seldepth {seldepth} score "
+    when abs(score) >= MATE_IN_MAX {
+        when score > 0 { line = line + "mate {trunc((MATE - score + 1) / 2)}" } else { line = line + "mate {-trunc((MATE + score) / 2)}" }
+    } else {
+        line = line + "cp {score}"
+    }
+    line = line + " nodes {nodes} nps {round(nodes * 1000 / ms)} time {round(ms)} pv"
+    i = 0
+    while i < pv_len[0] {
+        line = line + " " + move_text(pv_tab[i])
+        i = i + 1
+    }
+    show line
+}
+
+# Searches the current position within the limits set and gives back the best move.
+to think() {
+    change nodes = 0
+    change best_move = 0
+    change stop_flag = no
+    change thr_seq = 0
+    repeat STACK as k {
+        ss_eval[k - 1] = NONE
+        ss_move[k - 1] = 0
+        ss_pt[k - 1] = -1
+        ss_excluded[k - 1] = 0
+        ss_dext[k - 1] = 0
+        killer1[k - 1] = 0
+        killer2[k - 1] = 0
+        thr_cur[k - 1] = -1
+    }
+    # always have a legal move to play
+    us = side
+    first = 0
+    last = generate(0, no)
+    root_moves = 0
+    i = first
+    while i < last {
+        make(mv_from[i], mv_to[i], mv_flag[i])
+        safe = not attacked(king_sq[us], 1 - us)
+        unmake(mv_from[i], mv_to[i], mv_flag[i])
+        when safe {
+            when root_moves == 0 { change best_move = mv_code[i] }
+            root_moves = root_moves + 1
+        }
+        i = i + 1
+    }
+    when depth_limit > 0 { max_depth = min(depth_limit, MAX_PLY - 1) } else { max_depth = MAX_PLY - 1 }
+    prev_score = 0
+    stability = 0
+    prev_best = 0
+    depth = 1
+    while depth <= max_depth and root_moves > 0 {
+        change root_depth = depth
+        change root_nodes = zeros(4096)
+        change seldepth = 0
+        # Aspiration window around the previous score, widened on each fail.
+        delta = 18
+        alpha = -INF
+        beta = INF
+        when depth >= 4 {
+            alpha = max(prev_score - delta, -INF)
+            beta = min(prev_score + delta, INF)
+        }
+        score = 0
+        while yes {
+            pv_len[0] = 0
+            score = search(alpha, beta, depth, 0, no)
+            when stop_flag { stop }
+            when score <= alpha {
+                beta = trunc((alpha + beta) / 2)
+                alpha = max(score - delta, -INF)
+            } else when score >= beta {
+                beta = min(score + delta, INF)
+            } else {
+                stop
+            }
+            delta = delta + trunc(delta / 2)
+        }
+        when stop_flag and depth > 1 { stop }     # an interrupted iteration is discarded
+        when pv_len[0] > 0 { change best_move = pv_tab[0] }
+        report(depth, score)
+        # Soft limit, scaled by how settled the search looks
+        scale = 1
+        when depth >= 6 {
+            when best_move == prev_best { stability = min(stability + 1, 8) } else { stability = 0 }
+            stab = 1.6 - 0.11 * stability
+            falling = max(min(1 + (prev_score - score) / 120, 1.5), 0.85)
+            share = root_nodes[best_move % 4096] / max(nodes, 1)
+            focus = max(min(1.55 - share, 1.4), 0.6)
+            scale = stab * falling * focus * 0.75
+        }
+        prev_best = best_move
+        prev_score = score
+        change best_score = score
+        when timed and elapsed_ms() >= soft_ms * scale { stop }
+        when stop_flag { stop }
+        depth = depth + 1
+    }
+    best_move
+}

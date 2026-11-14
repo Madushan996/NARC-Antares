@@ -1,0 +1,48 @@
+# Times the pieces of the evaluation separately.
+use "../src/search"
+use "../src/config"
+
+load_network(NETWORK_FILE)
+set_fen("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10")
+N = 200000
+
+to lap(name, started, count) {
+    show "{name}: {round((clock() - started) * 1000000000 / count)} ns each"
+}
+
+evaluate()
+row_a = accumulator(int(0))
+row_w = out_rows[0]
+started = clock()
+total = 0
+repeat N { total = total + screlu_dot(row_a, row_w, 255) }
+lap("screlu_dot on two compact rows", started, N)
+
+started = clock()
+repeat N { fetched = accumulator(int(0)) }
+lap("accumulator lookup (already fresh)", started, N)
+
+started = clock()
+repeat N { fetched = out_rows[3] }
+lap("list lookup", started, N)
+
+add_rows[0] = 100
+sub_rows[0] = 200
+scratch = update_rows(row_a, ft, add_rows, 1, sub_rows, 1)
+started = clock()
+repeat N { scratch = update_rows(row_a, ft, add_rows, 1, sub_rows, 1, scratch) }
+lap("update_rows, one row added and one removed, memory reused", started, N)
+
+started = clock()
+repeat N { units = network_units() }
+lap("network_units (accumulators fresh)", started, N)
+
+generate(0, no)
+started = clock()
+repeat N {
+    make(mv_from[0], mv_to[0], mv_flag[0])
+    first_view = accumulator(int(0))
+    unmake(mv_from[0], mv_to[0], mv_flag[0])
+}
+lap("make + one accumulator update + unmake", started, N)
+show total

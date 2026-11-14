@@ -1,0 +1,86 @@
+# Times the building blocks of a search node, one at a time.
+# Most useful compiled:  antares build tests/profile.ant   then   tests/profile.exe
+
+use "../src/search"
+use "../src/config"
+
+load_network(NETWORK_FILE)
+set_fen("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10")
+N = 20000
+
+to lap(name, started, count) {
+    micro = (clock() - started) * 1000000 / count
+    show "{name}: {round(micro * 100) / 100} microseconds each"
+}
+
+started = clock()
+repeat N { generate(0, no) }
+lap("generate all moves", started, N)
+
+started = clock()
+repeat N { generate(0, yes) }
+lap("generate captures", started, N)
+
+started = clock()
+repeat N { mark_threats(0) }
+lap("mark threats", started, N)
+
+n_moves = generate(0, no)
+mark_threats(0)
+started = clock()
+repeat N { score_moves(0, int(0), n_moves, int(0), int(0), int(0), int(0), int(-1), int(-1), no) }
+lap("score {n_moves} moves", started, N)
+
+started = clock()
+repeat N {
+    score_moves(0, int(0), n_moves, int(0), int(0), int(0), int(0), int(-1), int(-1), no)
+    repeat 6 {
+        picked = pick(int(0), n_moves)
+        mv_score[picked] = USED
+    }
+}
+lap("score + pick 6 moves", started, N)
+
+generate(0, no)
+started = clock()
+repeat N {
+    make(mv_from[0], mv_to[0], mv_flag[0])
+    unmake(mv_from[0], mv_to[0], mv_flag[0])
+}
+lap("make + unmake", started, N)
+
+started = clock()
+repeat N { attacked(king_sq[0], 1) }
+lap("is the king attacked", started, N)
+
+started = clock()
+repeat N { see_ge(mv_from[0], mv_to[0], mv_flag[0], 0) }
+lap("exchange evaluation (first move)", started, N)
+
+started = clock()
+repeat N { evaluate() }
+lap("evaluate, accumulator ready", started, N)
+
+started = clock()
+repeat N {
+    make(mv_from[0], mv_to[0], mv_flag[0])
+    evaluate()
+    unmake(mv_from[0], mv_to[0], mv_flag[0])
+}
+lap("make + evaluate (incremental update) + unmake", started, N)
+
+started = clock()
+repeat N {
+    slot = hash & (TT_SIZE - 1)
+    hit = tt_hash[slot] == hash and tt_bnd[slot] != 0
+    tt_store(hash, 0, int(0), 10, 10, 3, 1, 0)
+}
+lap("table probe + store", started, N)
+
+change depth_limit = 9
+change quiet_mode = yes
+clear_tables()
+change start_time = clock()
+think()
+took = clock() - start_time
+show "search to depth 9: {nodes} positions, {round(nodes / took)} per second, {round(took * 1000000 / nodes * 10) / 10} microseconds each"

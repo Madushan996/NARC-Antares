@@ -1,0 +1,4 @@
+# Built engines are published as GitHub release assets, not kept in git
+*.exe
+*.pdb
+__pycache__/

@@ -1,0 +1,49 @@
+# Checks the network evaluation against numbers printed by the C++ engine
+# (NARC-Genesys-5.1-generic.exe, commands: position ..., eval).
+# Run: antares tests/test_eval.ant
+
+use "../src/nnue"
+use "../src/config"
+
+load_network(NETWORK_FILE)
+
+to expect(fen, cp, units) {
+    set_fen(fen)
+    got_units = network_units()
+    got_cp = evaluate()
+    when got_cp == cp and got_units == units {
+        show "ok   {cp} cp ({units} units)  {fen}"
+        give yes
+    }
+    show "FAIL got {got_cp} cp ({got_units} units), expected {cp} cp ({units} units)  {fen}"
+    no
+}
+
+good = yes
+good = expect(START_FEN, 28, 65) and good
+good = expect("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", -79, -183) and good
+good = expect("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 73, 170) and good
+good = expect("r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP1N1PPP/R1BQ1RK1 b - - 0 9", 18, 42) and good
+good = expect("6k1/5p2/6p1/8/3B4/1P3KP1/5P2/2b5 b - - 3 50", -200, -461) and good
+good = expect("3r2k1/pp3ppp/2p5/4P3/2P1n3/1P3N2/P4PPP/3R2K1 b - - 0 24", -140, -323) and good
+
+# The incrementally updated evaluation must equal the from-scratch one along
+# games with castling, en passant, promotions, captures and king moves.
+to walk(name, fen, moves) {
+    set_fen(fen)
+    same = network_units() == network_units_full()
+    each m in split(moves) {
+        check(play_text_move(m), "{name}: {m} is not legal")
+        when network_units() != network_units_full() { same = no }
+    }
+    when same { show "ok   incremental = from scratch along: {name}" } else { show "FAIL incremental differs along: {name}" }
+    same
+}
+good = walk("opening with both castlings", START_FEN, "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 e1g1 g8f6 d2d3 d7d6 c1g5 c8g4 b1c3 d8d7 d1d2 e8c8 a2a4 h7h6 g5f6 g7f6") and good
+good = walk("en passant and promotion", "4k3/1P6/8/3pP3/8/8/6p1/4K2R w K d6 0 1", "e5d6 g2h1q e1e2 h1h2 e2d3 h2h3 d3d4 e8d7 b7b8n d7d6") and good
+good = walk("king walks across the board", "8/p7/3k4/8/8/3K4/P7/8 w - - 0 1", "d3e4 d6e6 e4f4 e6f6 f4g4 f6g6 g4h4 g6h6 a2a4 a7a5 h4g4 h6g6 g4f4 g6f6 f4e4 f6e6 e4d4 e6d6 d4c4 d6c6") and good
+
+started = clock()
+repeat 200 { evaluate() }
+show "{round(200 / (clock() - started))} evaluations per second"
+when good { show "all evaluations match the C++ engine" } else { fail("evaluation mismatch") }

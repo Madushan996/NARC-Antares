@@ -1,0 +1,192 @@
+# NARC Genesys in Antares: the neural-network evaluation.
+#
+# This reads the real Genesys 5.1 network file and computes exactly what the
+# C++ engine computes (nnue.cpp): (768 x 16 king buckets) -> 1024, both
+# perspectives -> 8 output buckets by piece count, squared clipped ReLU.
+#
+# Like the C++ engine, the first layer is kept up to date incrementally as
+# moves are made, in compact 16-bit numbers.
+
+use "board"
+
+HIDDEN = 1024
+INPUTS = 12288
+net_name = "none"
+
+# Sixteen king buckets over the king square after mirroring files e-h onto a-d.
+kb16 = ints([0, 1, 2, 3, 3, 2, 1, 0, 4, 5, 6, 7, 7, 6, 5, 4,
+             8, 8, 9, 9, 9, 9, 8, 8, 10, 10, 11, 11, 11, 11, 10, 10,
+             12, 12, 13, 13, 13, 13, 12, 12, 12, 12, 13, 13, 13, 13, 12, 12,
+             14, 14, 15, 15, 15, 15, 14, 14, 14, 14, 15, 15, 15, 15, 14, 14])
+
+# Square transforms. xf[m + sq]: m = 0 as is, 64 files mirrored,
+# 128 ranks mirrored (Black's view), 192 both.
+xf = ints(256)
+repeat 64 as n {
+    sq = n - 1
+    f = sq % 8
+    r = floor(sq / 8)
+    xf[sq] = sq
+    xf[64 + sq] = r * 8 + 7 - f
+    xf[128 + sq] = (7 - r) * 8 + f
+    xf[192 + sq] = (7 - r) * 8 + 7 - f
+}
+
+ft = zeros(1)
+ft_bias = zeros(1)
+out_w = zeros(1)
+out_rows = []                 # the output weights, one row per (bucket, side)
+out_b = zeros(1)
+feat_w = zeros(32)
+feat_b = zeros(32)
+
+to load_network(file) {
+    head = read_binary(file, "u8", 0, 8)
+    check(head == [68, 82, 78, 78, 85, 69, 48, 51], "{file} is not a DRNNUE03 network")
+    shape_info = read_binary(file, "u32", 8, 7)
+    check(shape_info == [INPUTS, HIDDEN, 8, 16, 255, 64, 400], "this version supports the 16-bucket, 1024-wide network only")
+    at = 36
+    # The big tables are kept as compact 16-bit numbers, as in the network file.
+    change ft = compact(read_binary(file, "i16", at, INPUTS * HIDDEN), INPUTS, HIDDEN)
+    at = at + 2 * INPUTS * HIDDEN
+    change ft_bias = compact(read_binary(file, "i16", at, HIDDEN))
+    at = at + 2 * HIDDEN
+    change out_w = reshape(read_binary(file, "i16", at, 16 * HIDDEN), 16, HIDDEN)
+    change out_rows = rows(compact(out_w))
+    at = at + 2 * 16 * HIDDEN
+    change out_b = read_binary(file, "i32", at, 8)
+    change net_name = file
+}
+
+# ----- accumulators -----
+# An accumulator is the first layer's output for one side's view of the board.
+# As in the C++ engine it is updated lazily: a move only records what changed,
+# and when an evaluation needs the accumulator it is brought up to date from
+# the nearest ancestor that has one, by adding and subtracting the rows of the
+# pieces that moved. A king move changes that side's whole view, so its own
+# accumulator is rebuilt from scratch.
+
+accs = map(range(2 * AH), i => nothing)      # accs[perspective * AH + ply]
+add_rows = zeros(4)
+sub_rows = zeros(4)
+view_base = int(0)
+view_m = int(0)
+
+to set_view(persp) {
+    k = king_sq[persp]
+    m = persp * 128
+    when k & 7 >= 4 { m = m + 64 }
+    change view_m = m
+    change view_base = kb16[xf[m + k]] * 768
+}
+
+# The network input for piece p on square sq, in the current view.
+to feature(persp, p, sq) {
+    slot = view_base + (p & 7) * 64 + xf[view_m + sq]
+    when p >> 3 != persp { slot = slot + 384 }
+    slot
+}
+
+to rebuild(persp) {
+    set_view(persp)
+    n = int(0)
+    rest = by_color[0] | by_color[1]
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        feat_w[n] = feature(persp, board[sq], sq)
+        n = n + 1
+    }
+    update_rows(ft_bias, ft, feat_w, n, sub_rows, 0)
+}
+
+to accumulator(persp) {
+    top = persp * AH + gply
+    when fresh[top] == 1 { give accs[top] }
+    # walk back to the nearest ply that has this view's accumulator
+    i = gply
+    usable = yes
+    while i > 0 and fresh[persp * AH + i] != 1 {
+        i = i - 1
+        when h_flag[i] >= 0 and h_piece[i] & 7 == 5 and h_piece[i] >> 3 == persp {
+            usable = no
+            stop
+        }
+    }
+    when not usable or fresh[persp * AH + i] != 1 {
+        acc = rebuild(persp)
+        accs[top] = acc
+        fresh[top] = 1
+        give acc
+    }
+    set_view(persp)
+    acc = accs[persp * AH + i]
+    while i < gply {
+        flag = h_flag[i]
+        when flag >= 0 {
+            p = h_piece[i]
+            src = h_src[i]
+            dst = h_dst[i]
+            c = p >> 3
+            when flag >= 8 { placed = c * 8 + 1 + (flag & 3) } else { placed = p }
+            sub_rows[0] = feature(persp, p, src)
+            add_rows[0] = feature(persp, placed, dst)
+            n_add = 1
+            n_sub = 1
+            when flag == 5 {
+                when c == 0 { victim_sq = dst - 8 } else { victim_sq = dst + 8 }
+                sub_rows[1] = feature(persp, h_cap[i], victim_sq)
+                n_sub = 2
+            } else when flag == 4 or flag >= 12 {
+                sub_rows[1] = feature(persp, h_cap[i], dst)
+                n_sub = 2
+            } else when flag == 2 {
+                sub_rows[1] = feature(persp, c * 8 + 3, dst + 1)
+                add_rows[1] = feature(persp, c * 8 + 3, dst - 1)
+                n_sub = 2
+                n_add = 2
+            } else when flag == 3 {
+                sub_rows[1] = feature(persp, c * 8 + 3, dst - 2)
+                add_rows[1] = feature(persp, c * 8 + 3, dst + 1)
+                n_sub = 2
+                n_add = 2
+            }
+            acc = update_rows(acc, ft, add_rows, n_add, sub_rows, n_sub, accs[persp * AH + i + 1])
+        }
+        i = i + 1
+        accs[persp * AH + i] = acc
+        fresh[persp * AH + i] = 1
+    }
+    acc
+}
+
+# Network output in the engine's internal units, from the side to move's view.
+to network_units() {
+    # squared clipped ReLU of each view, times that view's output weights
+    pieces = number(popcount(by_color[0] | by_color[1]))
+    bucket = min(floor(max(pieces - 2, 0) / 4), 7)
+    ours = accumulator(side)
+    theirs = accumulator(1 - side)
+    total = screlu_dot(ours, out_rows[bucket * 2], 255) + screlu_dot(theirs, out_rows[bucket * 2 + 1], 255)
+    hidden = trunc(total / 255) + out_b[bucket]
+    trunc(hidden * 400 / 16320)
+}
+
+# The same number computed from scratch, with no saved accumulators and with
+# ordinary (not compact) arithmetic for the output layer, as an independent check.
+to network_units_full() {
+    acc_w = clip(expand(rebuild(0)), 0, 255)
+    acc_b = clip(expand(rebuild(1)), 0, 255)
+    pieces = number(popcount(by_color[0] | by_color[1]))
+    bucket = min(floor(max(pieces - 2, 0) / 4), 7)
+    when side == 0 {
+        total = sum(acc_w * acc_w * out_w[bucket * 2]) + sum(acc_b * acc_b * out_w[bucket * 2 + 1])
+    } else {
+        total = sum(acc_b * acc_b * out_w[bucket * 2]) + sum(acc_w * acc_w * out_w[bucket * 2 + 1])
+    }
+    hidden = trunc(total / 255) + out_b[bucket]
+    trunc(hidden * 400 / 16320)
+}
+
+# Centipawns, from the side to move's view.
+to evaluate() = trunc(number(network_units()) * 1000 / 2303)

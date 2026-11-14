@@ -1,0 +1,22 @@
+# Where the Genesys 5.1 network file lives.
+#
+# A binary built with the network embedded uses that copy. Otherwise the engine
+# looks next to itself, then in a `networks` folder beside or above it, so it
+# works from src/, tests/ and builds/. The UCI option EvalFile overrides both.
+
+to find_network() {
+    # binaries made by build.py carry the network inside them
+    when exists("embedded:narc-genesys.nnue") { give "embedded:narc-genesys.nnue" }
+    here = program_folder()
+    places = [
+        here + "/narc-genesys.nnue",
+        here + "/networks/narc-genesys.nnue",
+        here + "/../networks/narc-genesys.nnue"
+    ]
+    each place in places {
+        when exists(place) { give place }
+    }
+    here + "/../networks/narc-genesys.nnue"
+}
+
+NETWORK_FILE = find_network()
