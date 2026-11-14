@@ -56,6 +56,12 @@ to load_network(file) {
     at = at + 2 * 16 * HIDDEN
     change out_b = read_binary(file, "i32", at, 8)
     change net_name = file
+    # a new network makes every cached accumulator out of date
+    e = int(0)
+    while e < 64 {
+        cache_ready[e] = 0
+        e = e + 1
+    }
 }
 
 # ----- accumulators -----
@@ -70,7 +76,9 @@ to load_network(file) {
 # are changed by row (accs[row + 1] = update_rows(accs[row], ...)), which the
 # compiler does in place.
 
-accs = compact(zeros(2 * AH * HIDDEN), 2 * AH, HIDDEN)      # accs[perspective * AH + ply]
+# accs[perspective * AH + ply]; the 64 rows after those are the king-bucket cache
+CACHE_ROW = 2 * AH
+accs = compact(zeros((2 * AH + 64) * HIDDEN), 2 * AH + 64, HIDDEN)
 add_rows = zeros(4)
 sub_rows = zeros(4)
 view_base = int(0)
@@ -104,6 +112,64 @@ to rebuild(persp) {
     update_rows(ft_bias, ft, feat_w, n, sub_rows, 0)
 }
 
+# ----- king-bucket cache -----
+# As in the C++ engine: for each view (side, mirrored or not, king bucket) the
+# accumulator of the position it last served, and that position's pieces. A
+# king move brings that accumulator up to date by the pieces that differ,
+# instead of adding up every piece again. (16-bit sums wrap around, so the
+# order of the additions doesn't change the result: the same numbers as a
+# rebuild.)
+cache_bb = ints(64 * 12)          # cache_bb[entry * 12 + colour * 6 + type]
+cache_ready = ints(64)            # 0: the entry holds nothing yet
+ref_add = zeros(32)
+ref_sub = zeros(32)
+
+# This view's accumulator for the current position, into row `top` of accs.
+to refresh(persp, top) {
+    set_view(persp)
+    entry = div(view_m, 64) * 16 + div(view_base, 768)
+    row = CACHE_ROW + entry
+    when cache_ready[entry] == 0 {
+        accs[row] = update_rows(ft_bias, ft, ref_add, 0, ref_sub, 0)
+        j = int(0)
+        while j < 12 {
+            cache_bb[entry * 12 + j] = 0
+            j = j + 1
+        }
+        cache_ready[entry] = 1
+    }
+    n_add = 0
+    n_sub = 0
+    c = int(0)
+    while c < 2 {
+        t = int(0)
+        while t < 6 {
+            slot = entry * 12 + c * 6 + t
+            now = by_color[c] & by_type[t]
+            was = cache_bb[slot]
+            added = now & ~was
+            while added != 0 {
+                sq = lowest_bit(added)
+                added = added & (added - 1)
+                ref_add[n_add] = feature(persp, c * 8 + t, sq)
+                n_add = n_add + 1
+            }
+            removed = was & ~now
+            while removed != 0 {
+                sq = lowest_bit(removed)
+                removed = removed & (removed - 1)
+                ref_sub[n_sub] = feature(persp, c * 8 + t, sq)
+                n_sub = n_sub + 1
+            }
+            cache_bb[slot] = now
+            t = t + 1
+        }
+        c = c + 1
+    }
+    accs[row] = update_rows(accs[row], ft, ref_add, n_add, ref_sub, n_sub)
+    accs[top] = accs[row]
+}
+
 # Brings this view's accumulator up to date; gives its row in accs.
 to accumulator(persp) {
     top = persp * AH + gply
@@ -119,7 +185,7 @@ to accumulator(persp) {
         }
     }
     when not usable or fresh[persp * AH + i] != 1 {
-        accs[top] = rebuild(persp)
+        refresh(persp, top)
         fresh[top] = 1
         give top
     }
