@@ -2,11 +2,17 @@
 
 ![NARC Genesys 5.1 Antares Edition](builds/logo/narc-genesys-antares-banner.png)
 
+> **This is an experiment, not an update to NARC Genesys.** It is the NARC
+> Genesys 5.1 engine's code base re-written in
+> [Antares](https://github.com/Madushan996/Antares-Programming-Language), my
+> own programming language, to see how a real program does in it. It is not a
+> new version and does not need any testing or rating. It is slower and weaker
+> than the original, so to play against NARC or test it, use the C++
+> NARC Genesys 5.1.
+
 The NARC Genesys 5.1 chess engine (C++, by Madushan Dissanayake) re-written in
 the Antares language. It is a working UCI engine that uses the real Genesys 5.1
 network and searches the same way as the original.
-
-
 
 ## Binaries
 
