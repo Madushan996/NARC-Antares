@@ -1,4 +1,4 @@
-# NARC Genesys 5.1 in Antares
+# NARC Genesys 5.1 in Antares: an experiment
 
 ![NARC Genesys 5.1 Antares Edition](builds/logo/narc-genesys-antares-banner.png)
 
@@ -14,7 +14,7 @@ The NARC Genesys 5.1 chess engine (C++, by Madushan Dissanayake) re-written in
 the Antares language. It is a working UCI engine that uses the real Genesys 5.1
 network and searches the same way as the original.
 
-## Binaries
+## Binaries (to try it out)
 
 Ready-to-run engines are attached to the
 [GitHub releases](https://github.com/Madushan996/NARC-Antares/releases)
@@ -66,7 +66,7 @@ much faster than 0.1.0 and can embed the icon. Building with Antares 0.1.0
 gives the same engine (the same searches, move for move) at the earlier speed
 and without the icon.
 
-## Speed
+## Speed compared with the C++ engine
 
 Same position (after 1. e4 e5), search to depth 13, best of six runs on the
 development laptop, all engines measured in the same session:
@@ -143,7 +143,7 @@ engine and every binary search exactly the same positions (237,721 at depth 13
 above; 8,131 at depth 8). A 93-move game against the C++ engine, refereed by
 it, had no illegal moves.
 
-## What is the same as the C++ engine
+## What it shares with the C++ engine
 
 The search features that are on by default in 5.1, with the 5.1 constants:
 iterative deepening with aspiration windows, principal variation search,
@@ -156,7 +156,7 @@ the time manager with its stability / score-trend / node-share scaling, and
 the 5.1 repetition rule. The evaluation is the same network with the same
 arithmetic, updated incrementally and lazily as in the original.
 
-## What is different
+## How it differs from the C++ engine
 
 - **Move generation:** bitboards as in the original, but moves are generated
   without regard to pins and checked for legality by playing them, and
