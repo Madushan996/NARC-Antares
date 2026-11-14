@@ -92,8 +92,9 @@ repeat 64 as n {
 }
 
 # Squares a bishop on `sq` attacks when `occ` are the occupied squares. Each
-# ray is cut at the first occupied square, found with one bit scan.
-to bishop_att(sq, occ) {
+# ray is cut at the first occupied square, found with one bit scan. (Used to
+# build the magic tables below.)
+to bishop_ray(sq, occ) {
     a = ray[64 + sq]
     b = a & occ
     when b != 0 { a = a xor ray[64 + lowest_bit(b)] }
@@ -109,7 +110,7 @@ to bishop_att(sq, occ) {
     a | c | d | e
 }
 
-to rook_att(sq, occ) {
+to rook_ray(sq, occ) {
     a = ray[sq]
     b = a & occ
     when b != 0 { a = a xor ray[lowest_bit(b)] }
@@ -124,6 +125,109 @@ to rook_att(sq, occ) {
     when b != 0 { e = e xor ray[384 + highest_bit(b)] }
     a | c | d | e
 }
+
+# ----- magic attack tables -----
+# As in the C++ engine: for each square, the squares whose pieces can block a
+# rook or bishop (its rays without their last square), a magic number and a
+# slice of one big table. The attacks for any set of occupied squares are at
+#   offset + ((occupied & mask) * magic) >> shift
+# The magics are the C++ engine's; filling the tables checks every one.
+ROOK_SLOTS = 102400
+BISHOP_SLOTS = 5248
+rook_mask = ints(64)
+rook_shift = ints(64)
+rook_off = ints(64)
+rook_tab = ints(ROOK_SLOTS)
+bishop_mask = ints(64)
+bishop_shift = ints(64)
+bishop_off = ints(64)
+bishop_tab = ints(BISHOP_SLOTS)
+rook_magic = ints([
+    0x018000604000811B, 0x1080168220004000, 0x8880100208802000, 0x0200084200042011,
+    0x12000810A0020084, 0x4900010002040008, 0x2080410000800200, 0x4100008220421500,
+    0x8401800080400120, 0x0004400040201000, 0x0480801000802005, 0x0800800800100080,
+    0x0000800400800800, 0x4008800400800200, 0x1201000100020004, 0x0839000082084100,
+    0x0108288000400082, 0x0041050020400882, 0x0000808010002000, 0x000A020010402008,
+    0x0C04808004000800, 0x0090808002000400, 0x0019040002289001, 0x00280A000040810C,
+    0x0010802880004000, 0x00005000C0092000, 0x045B021500402000, 0x0108000880801000,
+    0x8008000500108900, 0x0800020080040080, 0x0000020400104108, 0x3900892200084484,
+    0x0000400020800080, 0x110081002A004200, 0x8440150041002002, 0x1042001022004008,
+    0x0020080080800400, 0x4800040080800200, 0x0080080204000110, 0x080404058A000849,
+    0x1000802040008004, 0x8010002000424000, 0x0024804200220010, 0x0055090010010020,
+    0x0000080004008080, 0x0024040002008080, 0x2200020001008080, 0x00801441108E0004,
+    0x0080002041009100, 0x000A228110400300, 0x0010200100401100, 0xA400080080100080,
+    0x0900880100100500, 0x2604008002000480, 0x00A0029001280400, 0x0030004104008200,
+    0x0000201100800041, 0x8005204A00108102, 0x9900082080420012, 0x208010002038C501,
+    0x0001000290080005, 0x4042000190040802, 0x8110100801008204, 0x0100108C00210442])
+bishop_magic = ints([
+    0x4002204911030105, 0x5A20280A40404008, 0x0004A80201422000, 0x8011040083100022,
+    0x0001104040000000, 0x05010402C0080000, 0x0010880110118000, 0x0000808801012008,
+    0x0400408202040101, 0x1006040808404081, 0x0082488800408221, 0x0040110400842000,
+    0x4200042420000504, 0x0400010420050100, 0x0210808208218404, 0x4002004404442248,
+    0x4020009002100120, 0x81424104100A0600, 0x00100001070AA101, 0x0004300802002010,
+    0x0101000820082800, 0x0080209210100803, 0x60160008D8040CE2, 0x04002011040104C4,
+    0x000620207908B036, 0x00082024080200A8, 0x0002020401080200, 0x0812080004040408,
+    0x0041010000104000, 0x2088020080412880, 0x0480842001042204, 0x446410200041042A,
+    0x8070446088448800, 0x2244304202080200, 0x0884004100082201, 0x2008020080180080,
+    0x8C90020200422008, 0x0010008201828A08, 0x0004040048042100, 0x1184408188042400,
+    0x4202022004202032, 0x4219010120221000, 0x0002022208020100, 0x8284082124020800,
+    0x041409612200C400, 0x004176080A000040, 0x04880208CC000202, 0x0008022410200040,
+    0x1001280104600000, 0x0008208804B00000, 0x8621420101988800, 0x0000000020880201,
+    0x8820803021024200, 0x2200092108008000, 0x0050200101222122, 0x092324080085000A,
+    0x4640104104202010, 0x1080010411010808, 0x010042808400C800, 0x8000100081940414,
+    0x1404224030021204, 0x0400004405380200, 0x2204203404084048, 0x0582040808210020])
+
+# A ray from `sq` in direction `d` without its last square (an edge square,
+# which never blocks anything beyond it).
+to inner_ray(d, sq) {
+    beam = ray[d * 64 + sq]
+    when beam == 0 { give beam }
+    when d <= 2 or d == 7 { last = highest_bit(beam) } else { last = lowest_bit(beam) }
+    beam & ~(1 << last)
+}
+
+mg_rook_next = int(0)
+mg_bishop_next = int(0)
+repeat 64 as n {
+    sq = n - 1
+    mg_mask = inner_ray(0, sq) | inner_ray(2, sq) | inner_ray(4, sq) | inner_ray(6, sq)
+    rook_mask[sq] = mg_mask
+    rook_shift[sq] = 64 - popcount(mg_mask)
+    rook_off[sq] = mg_rook_next
+    mg_sub = int(0)
+    mg_first = yes
+    # every subset of the mask, in carry-rippler order
+    while mg_first or mg_sub != 0 {
+        mg_first = no
+        mg_slot = mg_rook_next + ((mg_sub * rook_magic[sq]) >> rook_shift[sq])
+        mg_att = rook_ray(sq, mg_sub)
+        check(rook_tab[mg_slot] == 0 or rook_tab[mg_slot] == mg_att, "rook magic for square {sq} doesn't work")
+        rook_tab[mg_slot] = mg_att
+        mg_sub = (mg_sub - mg_mask) & mg_mask
+    }
+    mg_rook_next = mg_rook_next + (1 << popcount(mg_mask))
+
+    mg_mask = inner_ray(1, sq) | inner_ray(3, sq) | inner_ray(5, sq) | inner_ray(7, sq)
+    bishop_mask[sq] = mg_mask
+    bishop_shift[sq] = 64 - popcount(mg_mask)
+    bishop_off[sq] = mg_bishop_next
+    mg_sub = int(0)
+    mg_first = yes
+    while mg_first or mg_sub != 0 {
+        mg_first = no
+        mg_slot = mg_bishop_next + ((mg_sub * bishop_magic[sq]) >> bishop_shift[sq])
+        mg_att = bishop_ray(sq, mg_sub)
+        check(bishop_tab[mg_slot] == 0 or bishop_tab[mg_slot] == mg_att, "bishop magic for square {sq} doesn't work")
+        bishop_tab[mg_slot] = mg_att
+        mg_sub = (mg_sub - mg_mask) & mg_mask
+    }
+    mg_bishop_next = mg_bishop_next + (1 << popcount(mg_mask))
+}
+check(mg_rook_next == ROOK_SLOTS and mg_bishop_next == BISHOP_SLOTS, "magic table sizes")
+
+# Squares a rook or bishop on `sq` attacks when `occ` are the occupied squares.
+to rook_att(sq, occ) = rook_tab[rook_off[sq] + (((occ & rook_mask[sq]) * rook_magic[sq]) >> rook_shift[sq])]
+to bishop_att(sq, occ) = bishop_tab[bishop_off[sq] + (((occ & bishop_mask[sq]) * bishop_magic[sq]) >> bishop_shift[sq])]
 
 # ----- the position -----
 
