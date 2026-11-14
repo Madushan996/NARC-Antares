@@ -32,10 +32,10 @@ repeat 64 as n {
     xf[192 + sq] = (7 - r) * 8 + 7 - f
 }
 
-ft = zeros(1)
-ft_bias = zeros(1)
+ft = compact(zeros(1), 1, 1)
+ft_bias = compact(zeros(1))
 out_w = zeros(1)
-out_rows = []                 # the output weights, one row per (bucket, side)
+out_c = compact(zeros(1), 1, 1)   # the output weights as compact rows, one per (bucket, side)
 out_b = zeros(1)
 feat_w = zeros(32)
 feat_b = zeros(32)
@@ -52,7 +52,7 @@ to load_network(file) {
     change ft_bias = compact(read_binary(file, "i16", at, HIDDEN))
     at = at + 2 * HIDDEN
     change out_w = reshape(read_binary(file, "i16", at, 16 * HIDDEN), 16, HIDDEN)
-    change out_rows = rows(compact(out_w))
+    change out_c = compact(read_binary(file, "i16", at, 16 * HIDDEN), 16, HIDDEN)
     at = at + 2 * 16 * HIDDEN
     change out_b = read_binary(file, "i32", at, 8)
     change net_name = file
@@ -65,8 +65,12 @@ to load_network(file) {
 # the nearest ancestor that has one, by adding and subtracting the rows of the
 # pieces that moved. A king move changes that side's whole view, so its own
 # accumulator is rebuilt from scratch.
+#
+# All accumulators live in one compact matrix, one row per view and ply, and
+# are changed by row (accs[row + 1] = update_rows(accs[row], ...)), which the
+# compiler does in place.
 
-accs = map(range(2 * AH), i => nothing)      # accs[perspective * AH + ply]
+accs = compact(zeros(2 * AH * HIDDEN), 2 * AH, HIDDEN)      # accs[perspective * AH + ply]
 add_rows = zeros(4)
 sub_rows = zeros(4)
 view_base = int(0)
@@ -100,9 +104,10 @@ to rebuild(persp) {
     update_rows(ft_bias, ft, feat_w, n, sub_rows, 0)
 }
 
+# Brings this view's accumulator up to date; gives its row in accs.
 to accumulator(persp) {
     top = persp * AH + gply
-    when fresh[top] == 1 { give accs[top] }
+    when fresh[top] == 1 { give top }
     # walk back to the nearest ply that has this view's accumulator
     i = gply
     usable = yes
@@ -114,15 +119,14 @@ to accumulator(persp) {
         }
     }
     when not usable or fresh[persp * AH + i] != 1 {
-        acc = rebuild(persp)
-        accs[top] = acc
+        accs[top] = rebuild(persp)
         fresh[top] = 1
-        give acc
+        give top
     }
     set_view(persp)
-    acc = accs[persp * AH + i]
     while i < gply {
         flag = h_flag[i]
+        row = persp * AH + i
         when flag >= 0 {
             p = h_piece[i]
             src = h_src[i]
@@ -151,13 +155,14 @@ to accumulator(persp) {
                 n_sub = 2
                 n_add = 2
             }
-            acc = update_rows(acc, ft, add_rows, n_add, sub_rows, n_sub, accs[persp * AH + i + 1])
+            accs[row + 1] = update_rows(accs[row], ft, add_rows, n_add, sub_rows, n_sub)
+        } else {
+            accs[row + 1] = accs[row]
         }
         i = i + 1
-        accs[persp * AH + i] = acc
         fresh[persp * AH + i] = 1
     }
-    acc
+    top
 }
 
 # Network output in the engine's internal units, from the side to move's view.
@@ -167,7 +172,7 @@ to network_units() {
     bucket = min(floor(max(pieces - 2, 0) / 4), 7)
     ours = accumulator(side)
     theirs = accumulator(1 - side)
-    total = screlu_dot(ours, out_rows[bucket * 2], 255) + screlu_dot(theirs, out_rows[bucket * 2 + 1], 255)
+    total = screlu_dot(accs[ours], out_c[bucket * 2], 255) + screlu_dot(accs[theirs], out_c[bucket * 2 + 1], 255)
     hidden = trunc(total / 255) + out_b[bucket]
     trunc(hidden * 400 / 16320)
 }

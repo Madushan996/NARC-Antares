@@ -11,8 +11,8 @@ to lap(name, started, count) {
 }
 
 evaluate()
-row_a = accumulator(int(0))
-row_w = out_rows[0]
+row_a = accs[accumulator(int(0))]
+row_w = out_c[0]
 started = clock()
 total = 0
 repeat N { total = total + screlu_dot(row_a, row_w, 255) }
@@ -23,7 +23,7 @@ repeat N { fetched = accumulator(int(0)) }
 lap("accumulator lookup (already fresh)", started, N)
 
 started = clock()
-repeat N { fetched = out_rows[3] }
+repeat N { fetched = out_c[3] }
 lap("list lookup", started, N)
 
 add_rows[0] = 100
