@@ -134,13 +134,11 @@ to rook_ray(sq, occ) {
 # The magics are the C++ engine's; filling the tables checks every one.
 ROOK_SLOTS = 102400
 BISHOP_SLOTS = 5248
-rook_mask = ints(64)
-rook_shift = ints(64)
-rook_off = ints(64)
+# rook_info[sq * 4 + 0, 1, 2, 3]: offset, mask, magic, shift, side by side
+# (one cache line per square, like the C++ engine's struct)
+rook_info = ints(256)
 rook_tab = ints(ROOK_SLOTS)
-bishop_mask = ints(64)
-bishop_shift = ints(64)
-bishop_off = ints(64)
+bishop_info = ints(256)
 bishop_tab = ints(BISHOP_SLOTS)
 rook_magic = ints([
     0x018000604000811B, 0x1080168220004000, 0x8880100208802000, 0x0200084200042011,
@@ -191,15 +189,17 @@ mg_bishop_next = int(0)
 repeat 64 as n {
     sq = n - 1
     mg_mask = inner_ray(0, sq) | inner_ray(2, sq) | inner_ray(4, sq) | inner_ray(6, sq)
-    rook_mask[sq] = mg_mask
-    rook_shift[sq] = 64 - popcount(mg_mask)
-    rook_off[sq] = mg_rook_next
+    mg_shift = 64 - popcount(mg_mask)
+    rook_info[sq * 4] = mg_rook_next
+    rook_info[sq * 4 + 1] = mg_mask
+    rook_info[sq * 4 + 2] = rook_magic[sq]
+    rook_info[sq * 4 + 3] = mg_shift
     mg_sub = int(0)
     mg_first = yes
     # every subset of the mask, in carry-rippler order
     while mg_first or mg_sub != 0 {
         mg_first = no
-        mg_slot = mg_rook_next + ((mg_sub * rook_magic[sq]) >> rook_shift[sq])
+        mg_slot = mg_rook_next + ((mg_sub * rook_magic[sq]) >> mg_shift)
         mg_att = rook_ray(sq, mg_sub)
         check(rook_tab[mg_slot] == 0 or rook_tab[mg_slot] == mg_att, "rook magic for square {sq} doesn't work")
         rook_tab[mg_slot] = mg_att
@@ -208,14 +208,16 @@ repeat 64 as n {
     mg_rook_next = mg_rook_next + (1 << popcount(mg_mask))
 
     mg_mask = inner_ray(1, sq) | inner_ray(3, sq) | inner_ray(5, sq) | inner_ray(7, sq)
-    bishop_mask[sq] = mg_mask
-    bishop_shift[sq] = 64 - popcount(mg_mask)
-    bishop_off[sq] = mg_bishop_next
+    mg_shift = 64 - popcount(mg_mask)
+    bishop_info[sq * 4] = mg_bishop_next
+    bishop_info[sq * 4 + 1] = mg_mask
+    bishop_info[sq * 4 + 2] = bishop_magic[sq]
+    bishop_info[sq * 4 + 3] = mg_shift
     mg_sub = int(0)
     mg_first = yes
     while mg_first or mg_sub != 0 {
         mg_first = no
-        mg_slot = mg_bishop_next + ((mg_sub * bishop_magic[sq]) >> bishop_shift[sq])
+        mg_slot = mg_bishop_next + ((mg_sub * bishop_magic[sq]) >> mg_shift)
         mg_att = bishop_ray(sq, mg_sub)
         check(bishop_tab[mg_slot] == 0 or bishop_tab[mg_slot] == mg_att, "bishop magic for square {sq} doesn't work")
         bishop_tab[mg_slot] = mg_att
@@ -226,8 +228,14 @@ repeat 64 as n {
 check(mg_rook_next == ROOK_SLOTS and mg_bishop_next == BISHOP_SLOTS, "magic table sizes")
 
 # Squares a rook or bishop on `sq` attacks when `occ` are the occupied squares.
-to rook_att(sq, occ) = rook_tab[rook_off[sq] + (((occ & rook_mask[sq]) * rook_magic[sq]) >> rook_shift[sq])]
-to bishop_att(sq, occ) = bishop_tab[bishop_off[sq] + (((occ & bishop_mask[sq]) * bishop_magic[sq]) >> bishop_shift[sq])]
+to rook_att(sq, occ) {
+    b = sq * 4
+    rook_tab[rook_info[b] + (((occ & rook_info[b + 1]) * rook_info[b + 2]) >> rook_info[b + 3])]
+}
+to bishop_att(sq, occ) {
+    b = sq * 4
+    bishop_tab[bishop_info[b] + (((occ & bishop_info[b + 1]) * bishop_info[b + 2]) >> bishop_info[b + 3])]
+}
 
 # ----- the position -----
 
