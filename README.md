@@ -62,9 +62,8 @@ To rebuild the binaries (needs the `antares` command and Rust):
 python build.py
 ```
 
-The current binaries need a newer Antares than 0.2.0: they use compact matrices
-changed by row, which compiled programs do in place. Until that is released,
-build with Antares from its `claude/chess-speed` branch.
+The current binaries need Antares 0.3.0 or later: they use compact matrices
+changed by row, which compiled programs do in place.
 
 ## Speed compared with the C++ engine
 
