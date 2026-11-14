@@ -12,10 +12,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 # The interpreted engine by default. Set NARC_BINARY to test a compiled one,
-# for example NARC_BINARY=avx2 for builds/NARC-Genesys-5.1-Antares-bitboard-avx2.exe.
+# for example NARC_BINARY=avx2 for builds/NARC-Antares-avx2.exe.
 ANT_ENGINE = ["antares", os.path.join(ROOT, "src", "narc.ant")]
 if os.environ.get("NARC_BINARY"):
-    ANT_ENGINE = [os.path.join(ROOT, "builds", "NARC-Genesys-5.1-Antares-bitboard-" + os.environ["NARC_BINARY"] + ".exe")]
+    ANT_ENGINE = [os.path.join(ROOT, "builds", "NARC-Antares-" + os.environ["NARC_BINARY"] + ".exe")]
 CPP_ENGINE = [os.path.join(os.path.dirname(ROOT), "NARC_ChessEngine", "builds", "NARC-Genesys-5.1", "NARC-Genesys-5.1-generic.exe")]
 
 

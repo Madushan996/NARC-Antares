@@ -1,33 +1,37 @@
-# NARC Genesys 5.1 in Antares: an experiment
+# NARC Antares: an experiment
 
-![NARC Genesys 5.1 Antares Edition](builds/logo/narc-genesys-antares-banner.png)
+![NARC Antares](builds/logo/narc-genesys-antares-banner.png)
 
 > **This is an experiment, not an update to NARC Genesys.** It is the NARC
-> Genesys 5.1 engine's code base re-written in
+> Genesys engine's code base re-written in
 > [Antares](https://github.com/Madushan996/Antares-Programming-Language), my
 > own programming language, to see how a real program does in it. It is not a
 > new version and does not need any testing or rating. It is slower and weaker
 > than the original, so to play against NARC or test it, use the C++
-> NARC Genesys 5.1.
+> NARC Genesys.
 
-The NARC Genesys 5.1 chess engine (C++, by Madushan Dissanayake) re-written in
-the Antares language. It is a working UCI engine that uses the real Genesys 5.1
-network and searches the same way as the original.
+The NARC Genesys chess engine (C++, by Madushan Dissanayake) re-written in the
+Antares language. It is a working UCI engine that searches the same way as the
+original and uses a NARC Genesys network: `networks/narc-antares.nnue`, the
+mixed249m twin-lane network from the Genesys development engine (16 king
+buckets, 1024 hidden units of which 768 share their weights across king
+buckets). Its evaluations are exactly the C++ development engine's with the
+same network.
 
 ## Binaries (to try it out)
 
 Ready-to-run engines are attached to the
 [GitHub releases](https://github.com/Madushan996/NARC-Antares/releases)
-(`python build.py` puts them in `builds/`). There are two generations:
+(`python build.py` puts them in `builds/`):
 
 | Files | What they are |
 |---|---|
-| `NARC-Genesys-5.1-Antares-bitboard-*.exe` | The current engine: bitboards, about 360,000 to 400,000 positions per second |
-| `NARC-Genesys-5.1-Antares-*.exe` (no "bitboard") | The earlier array-board engine, about 145,000 to 210,000 per second. Kept because it may be installed in a chess GUI; its source is no longer in `src/` |
+| `NARC-Antares-*.exe` | The current engine, about 460,000 to 475,000 positions per second |
+| `NARC-Genesys-5.1-Antares-*.exe` | The earlier array-board engine (kept in `archive/array-board/`; it looks for the Genesys 5.1 network, which is no longer in `networks/`) |
 
-The bitboard binaries before this build (made with Antares 0.1.0, about 250,000
-positions per second) are kept in `archive/bitboard-antares-0.1/`, with the
-README that described them.
+Earlier builds of the bitboard engine, with the Genesys 5.1 network, are kept
+in `archive/`: `bitboard-antares-1.0/` (Antares 0.2.0, the v1.0 release) and
+`bitboard-antares-0.1/` (Antares 0.1.0).
 
 Each comes in four variants:
 
@@ -41,64 +45,58 @@ Each comes in four variants:
 Add one to a chess GUI as a UCI engine, or run it and type UCI commands
 (`uci`, `isready`, `position startpos moves e2e4`, `go depth 10`,
 `go movetime 2000`, `go wtime 60000 btime 60000`, `stop`, `quit`) or the
-extras `d` (show the board), `eval` and `perft 4`. The bitboard engine
-announces itself as "NARC Genesys 5.1 (Antares, bitboard)".
+extras `d` (show the board), `eval` and `perft 4`. It announces itself as
+"NARC Antares".
 
-The bitboard binaries have the network embedded (about 26 MB each), so each
-one is a single self-contained file: copy it anywhere and it runs. The UCI
-option `EvalFile` loads a different network file instead.
+Each binary has the network embedded (about 8.6 MB in all), so it is a single
+self-contained file: copy it anywhere and it runs. The UCI option `EvalFile`
+loads a different network file instead; both the twin-lane format (DRNNUE04)
+and the earlier single-lane one (DRNNUE03, like the Genesys 5.1 network) work.
 
-The `.bmp` next to each bitboard binary is its logo for Arena (100 x 50); the
-banner, icon and `.ico` of the Antares Edition logo are in `builds/logo/`.
+The `.bmp` next to each binary is its logo for Arena (100 x 50); the banner,
+icon and `.ico` are in `builds/logo/`.
 
-The earlier array-board binaries (about 1 MB) do not carry the network. They
-look for `narc-genesys.nnue` next to themselves, then in a `networks` folder
-beside or above them, so they work from `builds/` as they are.
-
-To rebuild the bitboard binaries (needs the `antares` command and Rust):
+To rebuild the binaries (needs the `antares` command and Rust):
 
 ```bash
 python build.py
 ```
 
-The current binaries were built with Antares 0.2.0, which compiles programs
-much faster than 0.1.0 and can embed the icon. Building with Antares 0.1.0
-gives the same engine (the same searches, move for move) at the earlier speed
-and without the icon.
+The current binaries need a newer Antares than 0.2.0: they use compact matrices
+changed by row, which compiled programs do in place. Until that is released,
+build with Antares from its `claude/chess-speed` branch.
 
 ## Speed compared with the C++ engine
 
 Same position (after 1. e4 e5), search to depth 13, best of six runs on the
-development laptop, all engines measured in the same session:
+development laptop, measured in the same session, both engines with the same
+network:
 
 | Engine | Positions searched | Positions per second |
 |---|---|---|
-| Antares bitboard, current binaries | 237,721 | 362,000 (sse42) to 400,000 (native) |
-| Antares bitboard, previous binaries (Antares 0.1.0) | 237,721 | 249,000 to 259,000 |
-| Antares array board, avx2 (earlier version) | 153,756 | 212,000 (earlier measurement) |
-| Antares bitboard, interpreted | 237,721 | about 4,000 |
-| Original C++, generic build | 251,654 | 395,000 |
-| Original C++, avx2 build | 251,654 | 936,000 |
+| NARC Antares, avx2 | 214,964 | 462,000 |
+| NARC Antares, native | 214,964 | 474,000 |
+| C++ NARC Genesys development build | 170,730 | 1,004,000 |
 
-The current bitboard binaries are about 1.5 times as fast as the previous
-ones and run at about 95% of the speed of the C++ generic build, while
-searching fewer positions to reach the same depth; they reach about 40% of the
-C++ avx2 build. Timings on this laptop vary by tens of percent from run to run
-(an earlier, cooler measurement had the C++ builds at 490,000 and 1,160,000),
-and more when a chess GUI is running engines at the same time.
+With the Genesys 5.1 network (single lane) the same Antares code reached about
+548,000 positions per second, against 433,000 for the C++ generic build and
+1,027,000 for the C++ avx2 build. A twin-lane network needs two row updates and
+two output sums per evaluation, so it costs the Antares engine more. Timings
+on this laptop vary by tens of percent from run to run, and more when a chess
+GUI is running engines at the same time.
 
 What still separates it from the original:
 
-- **The network.** About a quarter of the time goes to updating the
-  accumulators, and another tenth to passing them between the engine and the
-  language runtime as general values. A king move rebuilds that side's
-  accumulator from scratch, where the C++ engine uses a king-bucket cache.
-- **Checks the C++ does not make.** Array accesses are still checked to be in
-  range (most tables are now fixed-size arrays, so the check is against a
-  constant and arrays are no longer checked for sharing), and most functions
-  still report problems through a result value.
-- **Sliding-piece attacks.** Found by cutting rays at the first blocker with a
-  bit scan (four lookups per piece) instead of one magic or PEXT lookup.
+- **The network.** About a third of the time goes to the network: the updates
+  of the accumulators (the arithmetic is the same as the C++ engine's) and the
+  calls around them.
+- **Search values.** Scores, history and depths are ordinary Antares numbers
+  (64-bit decimals) where the C++ engine uses integers.
+- **Move generation.** Moves are generated without regard to pins and checked
+  by playing them; the C++ engine generates only legal moves.
+- **Checks the C++ does not make.** Array accesses are checked to be in range
+  (against a constant for the fixed tables), and most functions report
+  problems through a result value.
 
 `antares build tests/profile.ant` and `tests/profile_eval.ant` time each
 building block.
@@ -112,7 +110,7 @@ building block.
 | `src/search.ant` | The search and everything it learns while searching. Ports `search.cpp`, `movepick.cpp`, `tt.cpp`, `history.h` |
 | `src/narc.ant` | The UCI front end and time management. Ports `uci.cpp`, `main.cpp` |
 | `src/config.ant` | Finds the network: the embedded copy in a binary, otherwise the file |
-| `networks/narc-genesys.nnue` | The Genesys 5.1 network (a copy of the original's); embedded into the binaries by `build.py`, read directly when running interpreted |
+| `networks/narc-antares.nnue` | The network (the mixed249m twin-lane network of the Genesys development engine); embedded into the binaries by `build.py`, read directly when running interpreted |
 | `builds/` | The binaries |
 | `archive/array-board/` | The earlier array-board version: its binaries and its `nnue.ant`, `search.ant`, `narc.ant` (its `board.ant` was not kept) |
 | `build.py` | Builds the binaries |

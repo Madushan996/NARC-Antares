@@ -9,7 +9,7 @@
 use "search"
 use "config"
 
-ENGINE_NAME = "NARC Genesys 5.1 (Antares, bitboard)"
+ENGINE_NAME = "NARC Antares"
 move_overhead = 80
 net_file = NETWORK_FILE
 net_ready = no

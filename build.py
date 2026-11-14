@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NAME = "NARC-Genesys-5.1-Antares-bitboard"
+NAME = "NARC-Antares"
 
 # variant name -> processor level passed to `antares build --cpu`
 VARIANTS = {
@@ -32,7 +32,7 @@ def main():
             return 1
         out = os.path.join(HERE, "builds", f"{NAME}-{v}.exe")
         print(f"building {v} ...", flush=True)
-        network = os.path.join(HERE, "networks", "narc-genesys.nnue")
+        network = os.path.join(HERE, "networks", "narc-antares.nnue")
         icon = os.path.join(HERE, "builds", "logo", "narc-genesys-antares.ico")
         r = subprocess.run(["antares", "build", os.path.join(HERE, "src", "narc.ant"), out, "--cpu", VARIANTS[v], "--embed", network, "--icon", icon])
         if r.returncode != 0:

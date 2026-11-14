@@ -1,8 +1,13 @@
-# NARC Genesys in Antares: the neural-network evaluation.
+# NARC Antares: the neural-network evaluation.
 #
-# This reads the real Genesys 5.1 network file and computes exactly what the
-# C++ engine computes (nnue.cpp): (768 x 16 king buckets) -> 1024, both
+# This reads a NARC Genesys network file and computes exactly what the C++
+# engine computes (nnue.cpp): (768 x 16 king buckets) -> 1024, both
 # perspectives -> 8 output buckets by piece count, squared clipped ReLU.
+#
+# Two file formats are read. DRNNUE03 has one lane: every hidden unit's
+# weights depend on the king's bucket. DRNNUE04 ("twin lane") splits the
+# hidden units in two: the first SW units have one set of weights shared by all
+# king buckets (768 rows), the other KW units are king-bucketed as before.
 #
 # Like the C++ engine, the first layer is kept up to date incrementally as
 # moves are made, in compact 16-bit numbers.
@@ -32,34 +37,73 @@ repeat 64 as n {
     xf[192 + sq] = (7 - r) * 8 + 7 - f
 }
 
-ft = compact(zeros(1), 1, 1)
+# The king lane (king-bucketed weights) and, for twin-lane networks, the shared lane.
+twin = no
+ft = compact(zeros(1), 1, 1)          # king lane: INPUTS rows of KW numbers
 ft_bias = compact(zeros(1))
-out_w = zeros(1)
-out_c = compact(zeros(1), 1, 1)   # the output weights as compact rows, one per (bucket, side)
+out_c = compact(zeros(1), 1, 1)       # king-lane output weights, one row per (bucket, side)
+ft_s = compact(zeros(1), 1, 1)        # shared lane: 768 rows of SW numbers
+bias_s = compact(zeros(1))
+out_s = compact(zeros(1), 1, 1)
 out_b = zeros(1)
 feat_w = zeros(32)
-feat_b = zeros(32)
+feat_s = zeros(32)
+
+# accs[perspective * AH + ply] (and accs_s for the shared lane); the 64 rows
+# after those are the king-bucket cache
+CACHE_ROW = 2 * AH
+ACC_ROWS = 2 * AH + 64
+accs = compact(zeros(1), 1, 1)
+accs_s = compact(zeros(1), 1, 1)
 
 to load_network(file) {
     head = read_binary(file, "u8", 0, 8)
-    check(head == [68, 82, 78, 78, 85, 69, 48, 51], "{file} is not a DRNNUE03 network")
+    v4 = head == [68, 82, 78, 78, 85, 69, 48, 52]
+    check(v4 or head == [68, 82, 78, 78, 85, 69, 48, 51], "{file} is not a DRNNUE03 or DRNNUE04 network")
     shape_info = read_binary(file, "u32", 8, 7)
     check(shape_info == [INPUTS, HIDDEN, 8, 16, 255, 64, 400], "this version supports the 16-bucket, 1024-wide network only")
+    sw = 0
     at = 36
+    when v4 {
+        sw = read_binary(file, "u32", 36, 1)[0]
+        check(sw > 0 and sw < HIDDEN and sw % 256 == 0, "unsupported shared-lane width {sw}")
+        at = 40
+    }
+    kw = HIDDEN - sw
+    change twin = sw > 0
     # The big tables are kept as compact 16-bit numbers, as in the network file.
-    change ft = compact(read_binary(file, "i16", at, INPUTS * HIDDEN), INPUTS, HIDDEN)
-    at = at + 2 * INPUTS * HIDDEN
-    change ft_bias = compact(read_binary(file, "i16", at, HIDDEN))
+    when twin {
+        change ft_s = compact(read_binary(file, "i16", at, 768 * sw), 768, sw)
+        at = at + 2 * 768 * sw
+    }
+    change ft = compact(read_binary(file, "i16", at, INPUTS * kw), INPUTS, kw)
+    at = at + 2 * INPUTS * kw
+    # the bias and each output row: the shared lane's units first, then the king lane's
+    when twin { change bias_s = compact(read_binary(file, "i16", at, sw)) }
+    change ft_bias = compact(read_binary(file, "i16", at + 2 * sw, kw))
     at = at + 2 * HIDDEN
-    change out_w = reshape(read_binary(file, "i16", at, 16 * HIDDEN), 16, HIDDEN)
-    change out_c = compact(read_binary(file, "i16", at, 16 * HIDDEN), 16, HIDDEN)
+    change out_c = compact(zeros(16 * kw), 16, kw)
+    when twin { change out_s = compact(zeros(16 * sw), 16, sw) }
+    r = 0
+    while r < 16 {
+        out_c[r] = compact(read_binary(file, "i16", at + 2 * (r * HIDDEN + sw), kw))
+        when twin { out_s[r] = compact(read_binary(file, "i16", at + 2 * r * HIDDEN, sw)) }
+        r = r + 1
+    }
     at = at + 2 * 16 * HIDDEN
     change out_b = read_binary(file, "i32", at, 8)
     change net_name = file
-    # a new network makes every cached accumulator out of date
+    change accs = compact(zeros(ACC_ROWS * kw), ACC_ROWS, kw)
+    when twin { change accs_s = compact(zeros(ACC_ROWS * sw), ACC_ROWS, sw) }
+    # a new network makes every saved and cached accumulator out of date
     e = int(0)
     while e < 64 {
         cache_ready[e] = 0
+        e = e + 1
+    }
+    e = 0
+    while e < 2 * AH {
+        fresh[e] = 0
         e = e + 1
     }
 }
@@ -69,18 +113,18 @@ to load_network(file) {
 # As in the C++ engine it is updated lazily: a move only records what changed,
 # and when an evaluation needs the accumulator it is brought up to date from
 # the nearest ancestor that has one, by adding and subtracting the rows of the
-# pieces that moved. A king move changes that side's whole view, so its own
-# accumulator is rebuilt from scratch.
+# pieces that moved. A king move changes that side's whole view; its
+# accumulator then comes from the king-bucket cache below.
 #
-# All accumulators live in one compact matrix, one row per view and ply, and
-# are changed by row (accs[row + 1] = update_rows(accs[row], ...)), which the
-# compiler does in place.
+# All accumulators of a lane live in one compact matrix, one row per view and
+# ply, and are changed by row (accs[row + 1] = update_rows(accs[row], ...)),
+# which the compiler does in place. A feature's king-lane row is
+# view_base + local, its shared-lane row just local.
 
-# accs[perspective * AH + ply]; the 64 rows after those are the king-bucket cache
-CACHE_ROW = 2 * AH
-accs = compact(zeros((2 * AH + 64) * HIDDEN), 2 * AH + 64, HIDDEN)
 add_rows = zeros(4)
 sub_rows = zeros(4)
+add_s = zeros(4)
+sub_s = zeros(4)
 view_base = int(0)
 view_m = int(0)
 
@@ -92,13 +136,14 @@ to set_view(persp) {
     change view_base = kb16[xf[m + k]] * 768
 }
 
-# The network input for piece p on square sq, in the current view.
+# The network input for piece p on square sq, in the current view (king lane).
 to feature(persp, p, sq) {
     slot = view_base + (p & 7) * 64 + xf[view_m + sq]
     when p >> 3 != persp { slot = slot + 384 }
     slot
 }
 
+# This view's accumulator rows from scratch: the king lane's, and the shared lane's.
 to rebuild(persp) {
     set_view(persp)
     n = int(0)
@@ -112,6 +157,19 @@ to rebuild(persp) {
     update_rows(ft_bias, ft, feat_w, n, sub_rows, 0)
 }
 
+to rebuild_s(persp) {
+    set_view(persp)
+    n = int(0)
+    rest = by_color[0] | by_color[1]
+    while rest != 0 {
+        sq = lowest_bit(rest)
+        rest = rest & (rest - 1)
+        feat_s[n] = feature(persp, board[sq], sq) - view_base
+        n = n + 1
+    }
+    update_rows(bias_s, ft_s, feat_s, n, sub_s, 0)
+}
+
 # ----- king-bucket cache -----
 # As in the C++ engine: for each view (side, mirrored or not, king bucket) the
 # accumulator of the position it last served, and that position's pieces. A
@@ -123,6 +181,8 @@ cache_bb = ints(64 * 12)          # cache_bb[entry * 12 + colour * 6 + type]
 cache_ready = ints(64)            # 0: the entry holds nothing yet
 ref_add = zeros(32)
 ref_sub = zeros(32)
+ref_add_s = zeros(32)
+ref_sub_s = zeros(32)
 
 # This view's accumulator for the current position, into row `top` of accs.
 to refresh(persp, top) {
@@ -131,6 +191,7 @@ to refresh(persp, top) {
     row = CACHE_ROW + entry
     when cache_ready[entry] == 0 {
         accs[row] = update_rows(ft_bias, ft, ref_add, 0, ref_sub, 0)
+        when twin { accs_s[row] = update_rows(bias_s, ft_s, ref_add_s, 0, ref_sub_s, 0) }
         j = int(0)
         while j < 12 {
             cache_bb[entry * 12 + j] = 0
@@ -152,6 +213,7 @@ to refresh(persp, top) {
                 sq = lowest_bit(added)
                 added = added & (added - 1)
                 ref_add[n_add] = feature(persp, c * 8 + t, sq)
+                ref_add_s[n_add] = ref_add[n_add] - view_base
                 n_add = n_add + 1
             }
             removed = was & ~now
@@ -159,6 +221,7 @@ to refresh(persp, top) {
                 sq = lowest_bit(removed)
                 removed = removed & (removed - 1)
                 ref_sub[n_sub] = feature(persp, c * 8 + t, sq)
+                ref_sub_s[n_sub] = ref_sub[n_sub] - view_base
                 n_sub = n_sub + 1
             }
             cache_bb[slot] = now
@@ -168,6 +231,10 @@ to refresh(persp, top) {
     }
     accs[row] = update_rows(accs[row], ft, ref_add, n_add, ref_sub, n_sub)
     accs[top] = accs[row]
+    when twin {
+        accs_s[row] = update_rows(accs_s[row], ft_s, ref_add_s, n_add, ref_sub_s, n_sub)
+        accs_s[top] = accs_s[row]
+    }
 }
 
 # Brings this view's accumulator up to date; gives its row in accs.
@@ -222,8 +289,16 @@ to accumulator(persp) {
                 n_add = 2
             }
             accs[row + 1] = update_rows(accs[row], ft, add_rows, n_add, sub_rows, n_sub)
+            when twin {
+                add_s[0] = add_rows[0] - view_base
+                add_s[1] = add_rows[1] - view_base
+                sub_s[0] = sub_rows[0] - view_base
+                sub_s[1] = sub_rows[1] - view_base
+                accs_s[row + 1] = update_rows(accs_s[row], ft_s, add_s, n_add, sub_s, n_sub)
+            }
         } else {
             accs[row + 1] = accs[row]
+            when twin { accs_s[row + 1] = accs_s[row] }
         }
         i = i + 1
         fresh[persp * AH + i] = 1
@@ -239,21 +314,27 @@ to network_units() {
     ours = accumulator(side)
     theirs = accumulator(1 - side)
     total = screlu_dot(accs[ours], out_c[bucket * 2], 255) + screlu_dot(accs[theirs], out_c[bucket * 2 + 1], 255)
+    when twin {
+        total = total + screlu_dot(accs_s[ours], out_s[bucket * 2], 255) + screlu_dot(accs_s[theirs], out_s[bucket * 2 + 1], 255)
+    }
     hidden = trunc(total / 255) + out_b[bucket]
     trunc(hidden * 400 / 16320)
 }
 
+# One lane's share of the output from scratch, with ordinary (not compact) arithmetic.
+to full_lane(row, w) {
+    acc = clip(expand(row), 0, 255)
+    sum(acc * acc * expand(w))
+}
+
 # The same number computed from scratch, with no saved accumulators and with
-# ordinary (not compact) arithmetic for the output layer, as an independent check.
+# ordinary arithmetic for the output layer, as an independent check.
 to network_units_full() {
-    acc_w = clip(expand(rebuild(0)), 0, 255)
-    acc_b = clip(expand(rebuild(1)), 0, 255)
     pieces = number(popcount(by_color[0] | by_color[1]))
     bucket = min(floor(max(pieces - 2, 0) / 4), 7)
-    when side == 0 {
-        total = sum(acc_w * acc_w * out_w[bucket * 2]) + sum(acc_b * acc_b * out_w[bucket * 2 + 1])
-    } else {
-        total = sum(acc_b * acc_b * out_w[bucket * 2]) + sum(acc_w * acc_w * out_w[bucket * 2 + 1])
+    total = full_lane(rebuild(side), out_c[bucket * 2]) + full_lane(rebuild(1 - side), out_c[bucket * 2 + 1])
+    when twin {
+        total = total + full_lane(rebuild_s(side), out_s[bucket * 2]) + full_lane(rebuild_s(1 - side), out_s[bucket * 2 + 1])
     }
     hidden = trunc(total / 255) + out_b[bucket]
     trunc(hidden * 400 / 16320)

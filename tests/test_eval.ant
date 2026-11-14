@@ -1,5 +1,6 @@
 # Checks the network evaluation against numbers printed by the C++ engine
-# (NARC-Genesys-5.1-generic.exe, commands: position ..., eval).
+# (the NARC Genesys development build with the same network, narc-antares.nnue;
+# commands: setoption name EvalFile ..., position ..., eval).
 # Run: antares tests/test_eval.ant
 
 use "../src/nnue"
@@ -20,12 +21,12 @@ to expect(fen, cp, units) {
 }
 
 good = yes
-good = expect(START_FEN, 28, 65) and good
-good = expect("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", -79, -183) and good
-good = expect("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 73, 170) and good
-good = expect("r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP1N1PPP/R1BQ1RK1 b - - 0 9", 18, 42) and good
-good = expect("6k1/5p2/6p1/8/3B4/1P3KP1/5P2/2b5 b - - 3 50", -200, -461) and good
-good = expect("3r2k1/pp3ppp/2p5/4P3/2P1n3/1P3N2/P4PPP/3R2K1 b - - 0 24", -140, -323) and good
+good = expect(START_FEN, 25, 58) and good
+good = expect("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", -101, -234) and good
+good = expect("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 66, 152) and good
+good = expect("r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP1N1PPP/R1BQ1RK1 b - - 0 9", 9, 21) and good
+good = expect("6k1/5p2/6p1/8/3B4/1P3KP1/5P2/2b5 b - - 3 50", -225, -519) and good
+good = expect("3r2k1/pp3ppp/2p5/4P3/2P1n3/1P3N2/P4PPP/3R2K1 b - - 0 24", -106, -246) and good
 
 # The incrementally updated evaluation must equal the from-scratch one along
 # games with castling, en passant, promotions, captures and king moves.
