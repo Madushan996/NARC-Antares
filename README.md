@@ -55,9 +55,10 @@ To rebuild the bitboard binaries (needs the `antares` command and Rust):
 python build.py
 ```
 
-The current binaries were built with the faster compiler that will come with
-the next Antares release. Building with Antares 0.1.0 gives the same engine
-(the same searches, move for move) at the earlier speed.
+The current binaries were built with Antares 0.2.0, which compiles programs
+much faster than 0.1.0 and can embed the icon. Building with Antares 0.1.0
+gives the same engine (the same searches, move for move) at the earlier speed
+and without the icon.
 
 ## Speed
 

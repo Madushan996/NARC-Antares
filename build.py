@@ -5,7 +5,7 @@
 
 Needs the `antares` command and Rust (cargo) installed. Each variant takes
 about a minute. The network file is embedded, so every binary runs on its own,
-and so is the icon (on Windows; it needs an Antares with `--icon`).
+and so is the icon (on Windows; it needs Antares 0.2.0 or later).
 """
 import os
 import subprocess
