@@ -6,11 +6,7 @@ The NARC Genesys 5.1 chess engine (C++, by Madushan Dissanayake) re-written in
 the Antares language. It is a working UCI engine that uses the real Genesys 5.1
 network and searches the same way as the original.
 
-The original C++ engine lives in `Documents/NARC_ChessEngine` on the
-development machine; nothing there is changed or needed at run time. The
-Antares language is at
-[Madushan996/Antares-Programming-Language](https://github.com/Madushan996/Antares-Programming-Language)
-(`Documents/Antares` on the development machine).
+
 
 ## Binaries
 
