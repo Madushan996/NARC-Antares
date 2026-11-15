@@ -228,27 +228,30 @@ repeat 64 as n {
 check(mg_rook_next == ROOK_SLOTS and mg_bishop_next == BISHOP_SLOTS, "magic table sizes")
 
 # Squares a rook or bishop on `sq` attacks when `occ` are the occupied squares.
-to rook_att(sq, occ) {
+to rook_att(sq within 0 to 63, occ) {
     b = sq * 4
     rook_tab[rook_info[b] + (((occ & rook_info[b + 1]) * rook_info[b + 2]) >> rook_info[b + 3])]
 }
-to bishop_att(sq, occ) {
+to bishop_att(sq within 0 to 63, occ) {
     b = sq * 4
     bishop_tab[bishop_info[b] + (((occ & bishop_info[b + 1]) * bishop_info[b + 2]) >> bishop_info[b + 3])]
 }
 
 # ----- the position -----
 
-board = ints(64)            # the piece on each square, EMPTY if empty
-by_type = ints(6)           # one bitboard per piece type
+# The ranges (`within`) are checked whenever these are given a value, so the
+# compiled engine needs no check when it reads them or uses them as positions.
+HIST = 2400                 # plies remembered (see below)
+board = ints(64) within 0 to EMPTY     # the piece on each square, EMPTY if empty
+by_type = ints(8)           # one bitboard per piece type (6 and 7 unused, so p & 7 fits)
 by_color = ints(2)          # one bitboard per colour
-king_sq = ints(2)
-side = int(0)
-ep = int(64)                # en-passant target square, NO_SQ if none
-castle = int(0)             # 1 white short, 2 white long, 4 black short, 8 black long
+king_sq = ints(2) within 0 to 63
+side = int(0) within 0 to 1
+ep = int(64) within 0 to NO_SQ           # en-passant target square, NO_SQ if none
+castle = int(0) within 0 to 15           # 1 white short, 2 white long, 4 black short, 8 black long
 halfmove = int(0)
 since_null = int(0)
-gply = int(0)               # plies played, counting the game and the search
+gply = int(0) within 0 to HIST - 1       # plies played, counting the game and the search
 
 # Position keys: random 64-bit numbers combined with xor, as in the C++ engine.
 hash = int(0)
@@ -276,7 +279,6 @@ spoil[63] = 11
 spoil[56] = 7
 
 # What is needed to take a move back, one entry per ply.
-HIST = 2400
 h_hash = ints(HIST)
 h_pawn = ints(HIST)
 h_minor = ints(HIST)
@@ -304,9 +306,9 @@ mv_to = ints(MV_TOTAL)
 mv_flag = ints(MV_TOTAL)
 mv_code = ints(MV_TOTAL)
 mv_score = zeros(MV_TOTAL)
-mv_n = int(0)
+mv_n = int(0) within 0 to MV_TOTAL - 1
 
-to put_piece(p, sq) {
+to put_piece(p within 0 to EMPTY, sq within 0 to 63) {
     board[sq] = p
     b = 1 << sq
     kind_of = p & 7
@@ -324,7 +326,7 @@ to put_piece(p, sq) {
     }
 }
 
-to take_piece(sq) {
+to take_piece(sq within 0 to 63) {
     p = board[sq]
     board[sq] = EMPTY
     b = 1 << sq
@@ -343,7 +345,7 @@ to take_piece(sq) {
 }
 
 # Is `sq` attacked by a piece of colour `attacker`?
-to attacked(sq, attacker) {
+to attacked(sq within 0 to 63, attacker within 0 to 1) {
     theirs = by_color[attacker]
     when pawn_att[(1 - attacker) * 64 + sq] & by_type[0] & theirs != 0 { give yes }
     when knight_att[sq] & by_type[1] & theirs != 0 { give yes }
@@ -356,7 +358,7 @@ to attacked(sq, attacker) {
 to in_check() = attacked(king_sq[side], 1 - side)
 
 # Every piece of either colour that attacks `sq`, given the occupied squares.
-to attackers_to(sq, occ) {
+to attackers_to(sq within 0 to 63, occ) {
     (pawn_att[sq] & by_type[0] & by_color[1]) | (pawn_att[64 + sq] & by_type[0] & by_color[0]) | (knight_att[sq] & by_type[1]) | (king_att[sq] & by_type[5]) | (bishop_att(sq, occ) & (by_type[2] | by_type[4])) | (rook_att(sq, occ) & (by_type[3] | by_type[4]))
 }
 
@@ -389,7 +391,7 @@ to restore_state() {
 }
 
 # Plays a move. The caller checks afterwards that the mover's king is safe.
-to make(src, dst, flag) {
+to make(src within 0 to 63, dst within 0 to 63, flag) {
     us = side
     p = board[src]
     cap = EMPTY
@@ -441,7 +443,7 @@ to make(src, dst, flag) {
     fresh[AH + gply] = 0
 }
 
-to unmake(src, dst, flag) {
+to unmake(src within 0 to 63, dst within 0 to 63, flag) {
     change gply = gply - 1
     us = 1 - side
     change side = us
@@ -511,7 +513,7 @@ to insufficient_material() {
 
 # ----- move generation -----
 
-to push_move(src, dst, flag) {
+to push_move(src within 0 to 63, dst within 0 to 63, flag) {
     mv_from[mv_n] = src
     mv_to[mv_n] = dst
     mv_flag[mv_n] = flag
