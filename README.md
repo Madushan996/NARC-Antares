@@ -62,8 +62,10 @@ To rebuild the binaries (needs the `antares` command and Rust):
 python build.py
 ```
 
-The current binaries need Antares 0.3.0 or later: they use compact matrices
-changed by row, which compiled programs do in place.
+Building from source needs Antares 0.4.0 or later. The engine gives its board
+state and its move-generation functions ranges (`within`), so the compiled
+engine needs no position checks there, and it changes compact matrices by row
+in place.
 
 ## Speed compared with the C++ engine
 
