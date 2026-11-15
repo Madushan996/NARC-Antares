@@ -75,9 +75,23 @@ network:
 
 | Engine | Positions searched | Positions per second |
 |---|---|---|
-| NARC Antares, avx2 | 214,964 | 462,000 |
-| NARC Antares, native | 214,964 | 474,000 |
-| C++ NARC Genesys development build | 170,730 | 1,004,000 |
+| NARC Antares 2.1, avx2 | 214,964 | 541,000 |
+| NARC Antares 2.1, native | 214,964 | 573,000 |
+| C++ NARC Genesys development build | 170,730 | 1,177,000 |
+
+Version 2.1 is built with Antares 0.4.0 and gives the board state and the
+move-generation functions ranges (`within`), so the compiled engine needs no
+position checks there. Measured against the 2.0 binaries in the same session:
+
+| Binary | Search, 2.0 → 2.1 | Move generation (perft 5), 2.0 → 2.1 |
+|---|---|---|
+| generic | 514,000 → 539,000 (+5%) | 418 → 306 ms (+37%) |
+| sse42 | 502,000 → 500,000 (same) | 418 → 310 ms (+35%) |
+| avx2 | 526,000 → 541,000 (+3%) | 445 → 289 ms (+54%) |
+| native | 528,000 → 573,000 (+9%) | 443 → 295 ms (+50%) |
+
+Move generation gains the most; a search also spends about a third of its time
+in the network, which ranges don't change.
 
 With the Genesys 5.1 network (single lane) the same Antares code reached about
 548,000 positions per second, against 433,000 for the C++ generic build and
@@ -95,9 +109,11 @@ What still separates it from the original:
   (64-bit decimals) where the C++ engine uses integers.
 - **Move generation.** Moves are generated without regard to pins and checked
   by playing them; the C++ engine generates only legal moves.
-- **Checks the C++ does not make.** Array accesses are checked to be in range
-  (against a constant for the fixed tables), and most functions report
-  problems through a result value.
+- **Checks the C++ does not make.** Antares checks that positions are inside
+  the tables. Since 2.1 the compiler leaves the check out where it can prove
+  the position fits, which ranges make possible for the board and the move
+  list, but some remain (the magic attack tables, for example), and functions
+  that can still fail report problems through a result value.
 
 `antares build tests/profile.ant` and `tests/profile_eval.ant` time each
 building block.
