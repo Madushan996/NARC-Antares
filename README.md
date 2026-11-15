@@ -1,196 +1,119 @@
-# NARC Antares: an experiment
+# Antares Chess
 
-![NARC Antares](builds/logo/narc-genesys-antares-banner.png)
+![Antares Chess](builds/logo/antares-chess-banner.png)
 
-> **This is an experiment, not an update to NARC Genesys.** It is the NARC
-> Genesys engine's code base re-written in
-> [Antares](https://github.com/Madushan996/Antares-Programming-Language), my
-> own programming language, to see how a real program does in it. It is not a
-> new version and does not need any testing or rating. It is slower and weaker
-> than the original, so to play against NARC or test it, use the C++
-> NARC Genesys.
+A UCI chess engine written in [Antares](https://github.com/Madushan996/Antares-Programming-Language), my own programming language. It began as a port of my C++ engine NARC Genesys 5.1 and is now an engine of its own: everything in it is Antares code, compiled to a native program by `antares build`.
 
-The NARC Genesys chess engine (C++, by Madushan Dissanayake) re-written in the
-Antares language. It is a working UCI engine that searches the same way as the
-original and uses a NARC Genesys network: `networks/narc-antares.nnue`, the
-mixed249m twin-lane network from the Genesys development engine (16 king
-buckets, 1024 hidden units of which 768 share their weights across king
-buckets). Its evaluations are exactly the C++ development engine's with the
-same network.
+It searches with bitboards, magic move generation and a full modern search, and evaluates with a neural network (the mixed249m twin-lane network, trained for the NARC Genesys development engine: 16 king buckets and 1024 hidden units, 768 of them shared across king buckets).
 
-## Binaries (to try it out)
+## Download
 
-Ready-to-run engines are attached to the
-[GitHub releases](https://github.com/Madushan996/NARC-Antares/releases)
-(`python build.py` puts them in `builds/`):
+Ready-to-run engines are attached to the [releases](https://github.com/Madushan996/Antares_Chess/releases). Each is one self-contained file with the network inside. Add it to a chess GUI (Arena, Cute Chess, Banksia, En Croissant...) as a UCI engine. It announces itself as **Antares Chess**.
 
-| Files | What they are |
+| File | For |
 |---|---|
-| `NARC-Antares-*.exe` | The current engine, about 460,000 to 475,000 positions per second |
-| `NARC-Genesys-5.1-Antares-*.exe` | The earlier array-board engine (kept in `archive/array-board/`; it looks for the Genesys 5.1 network, which is no longer in `networks/`) |
+| `Antares-Chess-avx2.exe` | Processors with AVX2 (2013 and later). **Use this one if it runs.** |
+| `Antares-Chess-sse42.exe` | Processors with SSE4.2 (2009 and later) |
+| `Antares-Chess-generic.exe` | Any 64-bit PC |
+| `Antares-Chess-native.exe` | Built for the development laptop (Intel Skylake); may not start on other processors |
 
-Earlier builds of the bitboard engine, with the Genesys 5.1 network, are kept
-in `archive/`: `bitboard-antares-1.0/` (Antares 0.2.0, the v1.0 release) and
-`bitboard-antares-0.1/` (Antares 0.1.0).
+The `.bmp` with the same name is the engine's 100 x 50 logo for Arena (put it next to the `.exe`).
 
-Each comes in four variants:
+## Using it
 
-| Ending | For |
-|---|---|
-| `-avx2.exe` | Processors with AVX2 (2013 and later). Use this one if it runs. |
-| `-sse42.exe` | Processors with SSE4.2 (2009 and later) |
-| `-generic.exe` | Any 64-bit PC |
-| `-native.exe` | Built for exactly the machine that compiled it |
+UCI commands: `uci`, `isready`, `ucinewgame`, `position`, `go` (`depth`, `nodes`, `movetime`, `wtime`/`btime`/`winc`/`binc`/`movestogo`, `infinite`), `stop`, `quit`, plus `d` (show the board), `eval` and `perft N`.
 
-Add one to a chess GUI as a UCI engine, or run it and type UCI commands
-(`uci`, `isready`, `position startpos moves e2e4`, `go depth 10`,
-`go movetime 2000`, `go wtime 60000 btime 60000`, `stop`, `quit`) or the
-extras `d` (show the board), `eval` and `perft 4`. It announces itself as
-"NARC Antares".
+| Option | Default | What it does |
+|---|---|---|
+| `Hash` | 64 | Transposition table size in MB (1 to 256) |
+| `Move Overhead` | 80 | Milliseconds kept back from the clock for the GUI's delays |
+| `EvalFile` | (embedded) | Load another network file instead (the twin-lane DRNNUE04 format, or the single-lane DRNNUE03 format of the Genesys 5.1 network) |
 
-Each binary has the network embedded (about 8.6 MB in all), so it is a single
-self-contained file: copy it anywhere and it runs. The UCI option `EvalFile`
-loads a different network file instead; both the twin-lane format (DRNNUE04)
-and the earlier single-lane one (DRNNUE03, like the Genesys 5.1 network) work.
+One thread only.
 
-The `.bmp` next to each binary is its logo for Arena (100 x 50); the banner,
-icon and `.ico` are in `builds/logo/`.
+## Speed
 
-To rebuild the binaries (needs the `antares` command and Rust):
+Search to depth 13 after 1. e4 e5, best of six runs on the development laptop (Intel Core i7-6600U), all measured in the same session with the same network:
+
+| Engine | Positions searched | Positions per second | Time to depth 13 |
+|---|---:|---:|---:|
+| **Antares Chess 1.0, avx2** | 184,714 | 535,000 | 0.35 s |
+| **Antares Chess 1.0, native** | 184,714 | 534,000 | 0.35 s |
+| NARC Antares 2.1, native (the version before) | 214,964 | 567,000 | 0.38 s |
+| C++ NARC Genesys development build | 170,730 | 1,138,000 | 0.15 s |
+
+The new transposition table keeps more of what the search has found, so the engine needs 14% fewer positions to reach the same depth. It is about 6% slower per position, because a 64 MB table fits the processor's caches less well than the old 12 MB one. Overall it reaches depth 13 about 9% sooner.
+
+## Strength
+
+`tools/match.py` plays two engines against each other on real clocks, from 400 level openings (each played with both colours), and gives the Elo difference with its error margin:
 
 ```bash
-python build.py
+python tools/match.py NEW.exe OLD.exe --games 300 --tc 8+0.08
 ```
 
-Building from source needs Antares 0.4.0 or later. The engine gives its board
-state and its move-generation functions ranges (`within`), so the compiled
-engine needs no position checks there, and it changes compact matrices by row
-in place.
+Against NARC Antares 2.1 at 8 seconds + 0.08 per move, Antares Chess 1.0 scored 24 wins, 67 draws and 29 losses (120 games): **equal within the margin** (Elo −14, 95% range −56 to +27). At such short games the old table rarely filled up; the bucketed table with ageing is for longer games, where it has to choose what to keep.
 
-## Speed compared with the C++ engine
+## Building
 
-Same position (after 1. e4 e5), search to depth 13, best of six runs on the
-development laptop, measured in the same session, both engines with the same
-network:
+```bash
+python build.py            # all four binaries, into builds/
+python build.py avx2       # just one
+```
 
-| Engine | Positions searched | Positions per second |
-|---|---|---|
-| NARC Antares 2.1, avx2 | 214,964 | 541,000 |
-| NARC Antares 2.1, native | 214,964 | 573,000 |
-| C++ NARC Genesys development build | 170,730 | 1,177,000 |
+Needs Antares 0.4.0 or later (0.5.0 recommended) and Rust. The board state and the move-generation functions have ranges (`within`), so the compiled engine needs no position checks there. `python tools/make_logo.py` redraws the logo files.
 
-Version 2.1 is built with Antares 0.4.0 and gives the board state and the
-move-generation functions ranges (`within`), so the compiled engine needs no
-position checks there. Measured against the 2.0 binaries in the same session:
+To run the engine without compiling: `antares src/antares_chess.ant`
 
-| Binary | Search, 2.0 → 2.1 | Move generation (perft 5), 2.0 → 2.1 |
-|---|---|---|
-| generic | 514,000 → 539,000 (+5%) | 418 → 306 ms (+37%) |
-| sse42 | 502,000 → 500,000 (same) | 418 → 310 ms (+35%) |
-| avx2 | 526,000 → 541,000 (+3%) | 445 → 289 ms (+54%) |
-| native | 528,000 → 573,000 (+9%) | 443 → 295 ms (+50%) |
+## Inside
 
-Move generation gains the most; a search also spends about a third of its time
-in the network, which ranges don't change.
-
-With the Genesys 5.1 network (single lane) the same Antares code reached about
-548,000 positions per second, against 433,000 for the C++ generic build and
-1,027,000 for the C++ avx2 build. A twin-lane network needs two row updates and
-two output sums per evaluation, so it costs the Antares engine more. Timings
-on this laptop vary by tens of percent from run to run, and more when a chess
-GUI is running engines at the same time.
-
-What still separates it from the original:
-
-- **The network.** About a third of the time goes to the network: the updates
-  of the accumulators (the arithmetic is the same as the C++ engine's) and the
-  calls around them.
-- **Search values.** Scores, history and depths are ordinary Antares numbers
-  (64-bit decimals) where the C++ engine uses integers.
-- **Move generation.** Moves are generated without regard to pins and checked
-  by playing them; the C++ engine generates only legal moves.
-- **Checks the C++ does not make.** Antares checks that positions are inside
-  the tables. Since 2.1 the compiler leaves the check out where it can prove
-  the position fits, which ranges make possible for the board and the move
-  list, but some remain (the magic attack tables, for example), and functions
-  that can still fail report problems through a result value.
-
-`antares build tests/profile.ant` and `tests/profile_eval.ant` time each
-building block.
+- **Board:** bitboards, magic bitboards for sliding pieces (with the C++ engine's magic numbers), exchange evaluation (SEE).
+- **Evaluation:** the network, with accumulators kept in one compact matrix and updated incrementally and lazily, and a king-bucket cache.
+- **Search:**
+  - iterative deepening with aspiration windows, principal variation search and quiescence search;
+  - a transposition table of 4-entry buckets with ageing;
+  - pruning: mate-distance, reverse futility, razoring, null move, late move, futility, history and SEE;
+  - internal iterative reduction and late-move reductions;
+  - check extensions, and singular extensions with multi-cut.
+- **Move ordering:** killers, counter moves, threat-split quiet history, continuation history (1 and 2 plies back), capture history.
+- **Evaluation corrections:** pawn, non-pawn, minor-piece and continuation correction histories.
+- **Time management:** scaled by how stable the best move is, how the score is moving, and how much of the search went to the best move.
 
 ## Layout
 
 | Path | What it holds |
 |---|---|
-| `src/board.ant` | Bitboards and attack tables, the position, making and taking back moves, move generation, exchange evaluation (SEE), FEN, perft. Ports `position.cpp`, `movegen.cpp`, `bitboard.cpp`, `perft.cpp` |
-| `src/nnue.ant` | Loading the network; incremental accumulators; evaluation. Ports `nnue.cpp` |
-| `src/search.ant` | The search and everything it learns while searching. Ports `search.cpp`, `movepick.cpp`, `tt.cpp`, `history.h` |
-| `src/narc.ant` | The UCI front end and time management. Ports `uci.cpp`, `main.cpp` |
+| `src/board.ant` | Bitboards and attack tables, the position, making and taking back moves, move generation, SEE, FEN, perft |
+| `src/nnue.ant` | Loading the network, the incremental accumulators, evaluation |
+| `src/search.ant` | The search, the transposition table, move ordering and the histories |
+| `src/antares_chess.ant` | The UCI front end and time management |
 | `src/config.ant` | Finds the network: the embedded copy in a binary, otherwise the file |
-| `networks/narc-antares.nnue` | The network (the mixed249m twin-lane network of the Genesys development engine); embedded into the binaries by `build.py`, read directly when running interpreted |
-| `builds/` | The binaries |
-| `archive/array-board/` | The earlier array-board version: its binaries and its `nnue.ant`, `search.ant`, `narc.ant` (its `board.ant` was not kept) |
+| `networks/antares-chess.nnue` | The network |
+| `tools/` | `match.py` (engine matches), `make_openings.py` and `openings.txt`, `make_logo.py` |
+| `tests/` | Tests and timing tools |
+| `archive/` | Earlier versions (array board; bitboard engine with the Genesys 5.1 network) |
 | `build.py` | Builds the binaries |
-| `tests/` | Tests and the timing breakdown |
-
-To run the engine without compiling:
-
-```bash
-antares src/narc.ant
-```
 
 ## Tests
 
 | Command | What it checks |
 |---|---|
 | `antares tests/test_perft.ant` | Move generation: 11 perft counts on 6 standard positions |
-| `antares tests/test_eval.ant` | Evaluation equals the C++ engine's `eval` output on 6 positions, and the incremental update equals a from-scratch evaluation after every move of three games (castling, en passant, promotions, king walks) |
-| `python tests/uci_driver.py tactics` | With the C++ engine as reference: forced mates in 1, 2 and 3 found with the same length; other moves are the reference's choice or rated as good |
-| `python tests/uci_driver.py selfplay 150 140` | A 140-move game against itself, every move checked for legality by the C++ engine |
+| `antares tests/test_eval.ant` | The evaluation equals the C++ NARC Genesys engine's on 6 positions, and the incremental update equals a full one after every move of three games |
+| `python tests/uci_driver.py tactics` | Mates in 1, 2 and 3 found at the right length, with the C++ engine as referee |
+| `python tests/uci_driver.py selfplay 150 140` | A long game against itself, every move checked for legality by the C++ engine |
 
-Set `NARC_BINARY=avx2` (or `generic`, `sse42`, `native`) to run the two Python
-tests against a binary instead of the interpreted engine. They expect the
-original C++ build at
-`Documents/NARC_ChessEngine/builds/NARC-Genesys-5.1/NARC-Genesys-5.1-generic.exe`.
+Set `ANTARES_CHESS_BINARY=avx2` (or another variant) to run the Python tests against a binary instead of the interpreted engine. They expect the C++ engine at `Documents/NARC_ChessEngine/builds/NARC-Genesys-5.1/NARC-Genesys-5.1-generic.exe`.
 
-All of these pass, interpreted and on the bitboard binaries. The interpreted
-engine and every binary search exactly the same positions (237,721 at depth 13
-above; 8,131 at depth 8). A 93-move game against the C++ engine, refereed by
-it, had no illegal moves.
+## History
 
-## What it shares with the C++ engine
-
-The search features that are on by default in 5.1, with the 5.1 constants:
-iterative deepening with aspiration windows, principal variation search,
-quiescence search, transposition table, mate-distance pruning, reverse
-futility pruning, razoring, null-move pruning, internal iterative reduction,
-late-move, futility, history and SEE pruning, late-move reductions, check and
-singular extensions with multi-cut, killers, counter moves, threat-split quiet
-history, continuation history, capture history, the four correction histories,
-the time manager with its stability / score-trend / node-share scaling, and
-the 5.1 repetition rule. The evaluation is the same network with the same
-arithmetic, updated incrementally and lazily as in the original.
-
-## How it differs from the C++ engine
-
-- **Move generation:** bitboards as in the original, but moves are generated
-  without regard to pins and checked for legality by playing them, and
-  sliding attacks come from ray tables and bit scans, not magic bitboards.
-- **Evaluation:** a king move rebuilds that side's accumulator; there is no
-  king-bucket cache.
-- **Move ordering:** staged as in the original (hash move, captures, then
-  quiet moves only if still needed), but killers and the counter move are
-  ordered among the quiet moves by score instead of having their own stages.
-- **Transposition table:** one entry per slot (262,144 slots), always
-  replaced, instead of three-entry buckets with ageing. No `Hash` option.
-- **One thread only.** No `Threads` option.
-- **Not ported:** the features that are off by default in 5.1 (ProbCut, TT-PV,
-  fifty-move damping, quiescence evasion pruning, the double-extension cap,
-  doubt, root watch, four-ply continuation history), and the tools
-  (`bench`, `datagen`, `relabel`, `nnuecheck`, `legalcheck`, tuning options).
-- **Stopping:** the clock and the GUI are checked every 128 positions, so
-  `Move Overhead` defaults to 80 ms instead of 10.
+| Version | What it was |
+|---|---|
+| Antares Chess 1.0 | The new name, a bucketed transposition table with a `Hash` option, the match tools |
+| NARC Antares 2.1 | Built with Antares 0.4.0 (ranges): move generation 35 to 54% faster |
+| NARC Antares 2.0 | The twin-lane network, compact accumulators, magic bitboards, the king-bucket cache |
+| NARC Genesys 5.1 Antares Edition 1.0 | The first port of the C++ engine, with the Genesys 5.1 network |
 
 ## Licence
 
-GPL v3, the same as the original engine (see `LICENSE`).
+GPL v3, the same as NARC Genesys (see `LICENSE`).

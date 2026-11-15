@@ -33,7 +33,7 @@ def main():
         out = os.path.join(HERE, "builds", f"{NAME}-{v}.exe")
         print(f"building {v} ...", flush=True)
         network = os.path.join(HERE, "networks", "antares-chess.nnue")
-        icon = os.path.join(HERE, "builds", "logo", "narc-genesys-antares.ico")
+        icon = os.path.join(HERE, "builds", "logo", "antares-chess.ico")
         r = subprocess.run(["antares", "build", os.path.join(HERE, "src", "antares_chess.ant"), out, "--cpu", VARIANTS[v], "--embed", network, "--icon", icon])
         if r.returncode != 0:
             return r.returncode
