@@ -1,0 +1,42 @@
+# Helpers for the examples in "Inside Antares Chess".
+# Save this file in the engine's src folder as book.ant, next to board.ant.
+use "board"
+
+# Shows a bitboard as a small board: x for a 1 bit, . for a 0 bit.
+to grid(b) {
+    r = 7
+    while r >= 0 {
+        row = text(r + 1) + " "
+        repeat 8 as f {
+            when (b >> (r * 8 + f - 1)) & 1 != 0 { row = row + " x" } else { row = row + " ." }
+        }
+        show row
+        r = r - 1
+    }
+    show "   a b c d e f g h"
+}
+
+# The names of a bitboard's squares, lowest first.
+to squares(b) {
+    names = []
+    rest = b
+    while rest != 0 {
+        names = push(names, square_name(lowest_bit(rest)))
+        rest = rest & (rest - 1)
+    }
+    join(names, " ")
+}
+
+# The legal moves in the current position, as text like "e2e4".
+to legal_moves() {
+    names = []
+    us = side
+    n = generate(0, no)
+    repeat n as k {
+        i = k - 1
+        make(mv_from[i], mv_to[i], mv_flag[i])
+        when not attacked(king_sq[us], 1 - us) { names = push(names, move_text(mv_code[i])) }
+        unmake(mv_from[i], mv_to[i], mv_flag[i])
+    }
+    names
+}

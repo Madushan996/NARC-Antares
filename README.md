@@ -65,6 +65,15 @@ Needs Antares 0.4.0 or later (0.5.0 recommended) and Rust. The board state and t
 
 To run the engine without compiling: `antares src/antares_chess.ant`
 
+## The book
+
+[**Inside Antares Chess**](docs/Inside_Antares_Chess.pdf) is a beginner's guide to this engine's code: how a chess engine works, line by line, and the Antares language it is written in. Every listing is read from `src/` when the book is built, and every example is run:
+
+```bash
+python docs/src/check_examples.py     # runs the book's examples
+python docs/src/build.py              # builds docs/Inside_Antares_Chess.pdf
+```
+
 ## Inside
 
 - **Board:** bitboards, magic bitboards for sliding pieces (with the C++ engine's magic numbers), exchange evaluation (SEE).
@@ -91,6 +100,7 @@ To run the engine without compiling: `antares src/antares_chess.ant`
 | `networks/antares-chess.nnue` | The network |
 | `tools/` | `match.py` (engine matches), `make_openings.py` and `openings.txt`, `make_logo.py` |
 | `tests/` | Tests and timing tools |
+| `docs/` | The book *Inside Antares Chess* and its sources |
 | `archive/` | Earlier versions (array board; bitboard engine with the Genesys 5.1 network) |
 | `build.py` | Builds the binaries |
 
