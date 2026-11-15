@@ -1,5 +1,5 @@
 # Checks the network evaluation against numbers printed by the C++ engine
-# (the NARC Genesys development build with the same network, narc-antares.nnue;
+# (the NARC Genesys development build with the same network, antares-chess.nnue;
 # commands: setoption name EvalFile ..., position ..., eval).
 # Run: antares tests/test_eval.ant
 

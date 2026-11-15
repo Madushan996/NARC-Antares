@@ -1,4 +1,4 @@
-# NARC Genesys in Antares: the search.
+# Antares Chess: the search.
 #
 # A port of search.cpp, movepick.cpp, tt.cpp and history.h with the features
 # that are switched on by default in Genesys 5.1:
@@ -11,7 +11,7 @@
 #   (1 and 2 plies back), capture history, and the four correction histories.
 # The tuned constants are the 5.1 values from search.h.
 #
-# Differences from the C++ engine are listed in narc/README.md.
+# It began as a port of the NARC Genesys 5.1 search; see README.md.
 
 use "board"
 use "nnue"
@@ -21,17 +21,21 @@ MATE = 32000
 MATE_IN_MAX = 31872
 NONE = 32002
 USED = -1000000000000000
-TT_SIZE = 262144
+TT_MAX = 16777216              # entries at most (256 MB); the Hash option uses part of it
 SING_SLOT = MAX_PLY + 4        # move slots used by singular (excluded-move) searches
 
-# ----- transposition table (one entry per slot) -----
-# bound: 0 empty, 1 upper, 2 lower, 3 exact
-tt_hash = ints(TT_SIZE)
-tt_mv = ints(TT_SIZE)
-tt_sc = zeros(TT_SIZE)
-tt_ev = zeros(TT_SIZE)
-tt_dp = zeros(TT_SIZE)
-tt_bnd = zeros(TT_SIZE)
+# ----- transposition table -----
+# Buckets of 4 entries (64 bytes, one cache line). An entry is the position's
+# key and one packed word:
+#   bits 0-15 move, 16-31 score + 32768, 32-47 eval + 32768,
+#   48-55 depth + 8, 56-57 bound (1 upper, 2 lower, 3 exact; 0 = empty),
+#   58-63 the search it was stored in (its age).
+# A new position replaces the bucket's least valuable entry: the shallowest,
+# counting 4 plies off for every search since it was stored.
+tt_key = ints(TT_MAX)
+tt_data = ints(TT_MAX)
+tt_mask = int(1048575) within 0 to TT_MAX / 4 - 1      # buckets in use - 1 (64 MB)
+tt_gen = int(0) within 0 to 63
 
 # ----- move ordering tables (history.h) -----
 quiet_hist = zeros(32768)          # [side][from attacked][to attacked][from][to]
@@ -100,13 +104,42 @@ quiet_mode = no
 
 to elapsed_ms() = (clock() - start_time) * 1000
 
+# The Hash option: the table in megabytes (a power of two of buckets is used).
+to set_hash(mb) {
+    buckets = int(1)
+    while buckets * 2 * 64 <= mb * 1048576 and buckets * 2 <= TT_MAX / 4 { buckets = buckets * 2 }
+    change tt_mask = buckets - 1
+    clear_tt()
+}
+
+to clear_tt() {
+    i = int(0)
+    n = (tt_mask + 1) * 4
+    while i < n {
+        tt_key[i] = 0
+        tt_data[i] = 0
+        i = i + 1
+    }
+}
+
+# The entry holding this position, or -1.
+to tt_find(key) {
+    b = (key & tt_mask) << 2
+    repeat 4 as j {
+        i = b + j - 1
+        when tt_key[i] == key and tt_data[i] != 0 { give i }
+    }
+    -1
+}
+
+to tt_move_at(i) = tt_data[i] & 65535
+to tt_score_at(i) = number((tt_data[i] >> 16) & 65535) - 32768
+to tt_eval_at(i) = number((tt_data[i] >> 32) & 65535) - 32768
+to tt_depth_at(i) = number((tt_data[i] >> 48) & 255) - 8
+to tt_bound_at(i) = number((tt_data[i] >> 56) & 3)
+
 to clear_tables() {
-    change tt_hash = ints(TT_SIZE)
-    change tt_mv = ints(TT_SIZE)
-    change tt_sc = zeros(TT_SIZE)
-    change tt_ev = zeros(TT_SIZE)
-    change tt_dp = zeros(TT_SIZE)
-    change tt_bnd = zeros(TT_SIZE)
+    clear_tt()
     change quiet_hist = zeros(32768)
     change cap_hist = zeros(4608)
     change cont_hist = zeros(589824)
@@ -147,16 +180,46 @@ to hist_new(entry, bonus) {
 }
 
 to tt_store(key, ply, move, score, ev, depth, bound, pv_bonus) {
-    slot = key & (TT_SIZE - 1)
-    same = tt_hash[slot] == key and tt_bnd[slot] != 0
-    when move != 0 or not same { tt_mv[slot] = move }
-    when same and bound != 3 and depth + 3 + 2 * pv_bonus < tt_dp[slot] { give nothing }
+    # this position's entry, else an empty one, else the least valuable
+    b = (key & tt_mask) << 2
+    slot = b
+    worst = 1000000
+    same = no
+    repeat 4 as j {
+        i = b + j - 1
+        d = tt_data[i]
+        when tt_key[i] == key and d != 0 {
+            slot = i
+            same = yes
+            stop
+        }
+        when d == 0 {
+            when worst > -1000 {
+                slot = i
+                worst = -1000
+            }
+        } else {
+            value = number((d >> 48) & 255) - 4 * number((tt_gen - (d >> 58)) & 63)
+            when value < worst {
+                slot = i
+                worst = value
+            }
+        }
+    }
+    old = tt_data[slot]
+    keep_move = int(0)
+    when same and move == 0 { keep_move = old & 65535 }
+    when same and bound != 3 and depth + 3 + 2 * pv_bonus < number((old >> 48) & 255) - 8 {
+        # keep the deeper result, but take a new best move
+        when move != 0 { tt_data[slot] = (old & (~65535)) | int(move) }
+        give nothing
+    }
     when score >= MATE_IN_MAX { score = score + ply } else when score <= -MATE_IN_MAX { score = score - ply }
-    tt_hash[slot] = key
-    tt_sc[slot] = score
-    tt_ev[slot] = ev
-    tt_dp[slot] = depth
-    tt_bnd[slot] = bound
+    m = int(move)
+    when m == 0 { m = keep_move }
+    dp = max(min(depth, 240), -8)
+    tt_key[slot] = key
+    tt_data[slot] = m | (int(score + 32768) << 16) | (int(ev + 32768) << 32) | (int(dp + 8) << 48) | (int(bound) << 56) | (tt_gen << 58)
 }
 
 # A stored score, with mate distances counted from this ply again.
@@ -345,17 +408,17 @@ to qsearch(alpha, beta, ply) {
     }
     sp = ply + 4
     key = hash
-    slot = key & (TT_SIZE - 1)
-    tt_hit = tt_hash[slot] == key and tt_bnd[slot] != 0
+    slot = tt_find(key)
+    tt_hit = slot >= 0
     tt_move = 0
     tt_score = NONE
     tt_eval = NONE
     tt_bound = 0
     when tt_hit {
-        tt_move = tt_mv[slot]
-        tt_score = score_from_tt(tt_sc[slot], ply)
-        tt_eval = tt_ev[slot]
-        tt_bound = tt_bnd[slot]
+        tt_move = tt_move_at(slot)
+        tt_score = score_from_tt(tt_score_at(slot), ply)
+        tt_eval = tt_eval_at(slot)
+        tt_bound = tt_bound_at(slot)
         when not pv and (tt_bound == 3 or (tt_bound == 2 and tt_score >= beta) or (tt_bound == 1 and tt_score <= alpha)) {
             give tt_score
         }
@@ -465,14 +528,14 @@ to search(alpha, beta, depth, ply, cutnode) {
     tt_depth = -99
     tt_bound = 0
     when excluded == 0 {
-        slot = key & (TT_SIZE - 1)
-        when tt_hash[slot] == key and tt_bnd[slot] != 0 {
+        slot = tt_find(key)
+        when slot >= 0 {
             tt_hit = yes
-            tt_move = tt_mv[slot]
-            tt_score = score_from_tt(tt_sc[slot], ply)
-            tt_eval = tt_ev[slot]
-            tt_depth = tt_dp[slot]
-            tt_bound = tt_bnd[slot]
+            tt_move = tt_move_at(slot)
+            tt_score = score_from_tt(tt_score_at(slot), ply)
+            tt_eval = tt_eval_at(slot)
+            tt_depth = tt_depth_at(slot)
+            tt_bound = tt_bound_at(slot)
         }
     }
     when root and best_move != 0 { tt_move = best_move }
@@ -771,6 +834,7 @@ to report(depth, score) {
 
 # Searches the current position within the limits set and gives back the best move.
 to think() {
+    change tt_gen = (tt_gen + 1) & 63
     change nodes = 0
     change best_move = int(0)
     change stop_flag = no

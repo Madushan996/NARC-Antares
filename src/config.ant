@@ -1,5 +1,5 @@
-# Where the network file lives (narc-antares.nnue: the mixed249m twin-lane network
-# of the NARC Genesys development engine).
+# Where the network file lives (antares-chess.nnue: the mixed249m twin-lane network,
+# trained for the NARC Genesys development engine).
 #
 # A binary built with the network embedded uses that copy. Otherwise the engine
 # looks next to itself, then in a `networks` folder beside or above it, so it
@@ -7,17 +7,17 @@
 
 to find_network() {
     # binaries made by build.py carry the network inside them
-    when exists("embedded:narc-antares.nnue") { give "embedded:narc-antares.nnue" }
+    when exists("embedded:antares-chess.nnue") { give "embedded:antares-chess.nnue" }
     here = program_folder()
     places = [
-        here + "/narc-antares.nnue",
-        here + "/networks/narc-antares.nnue",
-        here + "/../networks/narc-antares.nnue"
+        here + "/antares-chess.nnue",
+        here + "/networks/antares-chess.nnue",
+        here + "/../networks/antares-chess.nnue"
     ]
     each place in places {
         when exists(place) { give place }
     }
-    here + "/../networks/narc-antares.nnue"
+    here + "/../networks/antares-chess.nnue"
 }
 
 NETWORK_FILE = find_network()

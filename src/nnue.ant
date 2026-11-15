@@ -1,4 +1,4 @@
-# NARC Antares: the neural-network evaluation.
+# Antares Chess: the neural-network evaluation.
 #
 # This reads a NARC Genesys network file and computes exactly what the C++
 # engine computes (nnue.cpp): (768 x 16 king buckets) -> 1024, both

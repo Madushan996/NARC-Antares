@@ -71,8 +71,7 @@ lap("make + evaluate (incremental update) + unmake", started, N)
 
 started = clock()
 repeat N {
-    slot = hash & (TT_SIZE - 1)
-    hit = tt_hash[slot] == hash and tt_bnd[slot] != 0
+    hit = tt_find(hash) >= 0
     tt_store(hash, 0, int(0), 10, 10, 3, 1, 0)
 }
 lap("table probe + store", started, N)

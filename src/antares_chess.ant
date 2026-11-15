@@ -1,6 +1,7 @@
-# NARC Genesys 5.1, written in Antares: the UCI front end (uci.cpp).
+# Antares Chess: the UCI front end and time management.
+# (It began as a port of the NARC Genesys 5.1 C++ engine's uci.cpp.)
 #
-# Run it interpreted:  antares src/narc.ant
+# Run it interpreted:  antares src/antares_chess.ant
 # Or use a binary from builds/ (made by `python build.py`).
 #
 # Commands: uci, isready, ucinewgame, position, go, stop, setoption, quit,
@@ -9,7 +10,7 @@
 use "search"
 use "config"
 
-ENGINE_NAME = "NARC Antares"
+ENGINE_NAME = "Antares Chess"
 move_overhead = 80
 net_file = NETWORK_FILE
 net_ready = no
@@ -124,6 +125,8 @@ to set_option(words) {
     when name == "evalfile" {
         change net_file = value
         change net_ready = no
+    } else when name == "hash" {
+        set_hash(max(min(number(value), 256), 1))
     } else when name == "move overhead" {
         change move_overhead = number(value)
     }
@@ -136,6 +139,7 @@ to handle(line) {
     when cmd == "uci" {
         show "id name {ENGINE_NAME}"
         show "id author Madushan Dissanayake (Sri Lanka)"
+        show "option name Hash type spin default 64 min 1 max 256"
         show "option name Move Overhead type spin default 80 min 0 max 5000"
         show "option name EvalFile type string default {NETWORK_FILE}"
         show "uciok"

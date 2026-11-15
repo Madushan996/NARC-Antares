@@ -1,4 +1,4 @@
-# NARC Genesys in Antares: the board, making moves, and move generation.
+# Antares Chess: the board, making moves, and move generation.
 #
 # Like the C++ engine, the position is kept in bitboards: 64-bit integers with
 # one bit per square (a1 = bit 0, h1 = bit 7, a8 = bit 56, h8 = bit 63).
